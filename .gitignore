@@ -1,6 +1,7 @@
-# Secrets — NEVER commit (contents ignored, keep dir as placeholder)
+# Secrets — NEVER commit (contents ignored, keep docs + placeholder)
 secrets/*
 !secrets/.gitkeep
+!secrets/README.md
 client_secret.json
 token.json
 *.key
