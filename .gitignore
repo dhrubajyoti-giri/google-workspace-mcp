@@ -1,0 +1,38 @@
+# Secrets — NEVER commit (contents ignored, keep dir as placeholder)
+secrets/*
+!secrets/.gitkeep
+client_secret.json
+token.json
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Session-local todo files
+*_TODO.md
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

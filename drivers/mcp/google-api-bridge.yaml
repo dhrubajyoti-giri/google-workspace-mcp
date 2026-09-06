@@ -1,0 +1,19 @@
+name: google-api-bridge
+protocol: mcp
+endpoint:
+  transport: streamable_http
+  url: http://127.0.0.1:__MCP_PORT__/mcp/
+  # QwenPaw resolves ${AUTH_TOKEN} from its runtime environment.
+  # Must match AUTH_TOKEN in the bridge's .env (docker-compose.yml).
+  # The actual token never appears in this file — only the env reference.
+  headers:
+    Authorization: "Bearer ${AUTH_TOKEN}"
+credentials: {}
+config:
+  display_name: Google API Bridge
+  description: Standalone Google API bridge with independent OAuth — Gmail, Drive, Docs, Sheets, Calendar, Slides, Forms, Tasks, Chat
+  tools: null
+enabled: true
+policy:
+  default_effect: ask
+  rules: []

@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────────
+# Caddy reverse proxy for the Google API Bridge
+#
+# Public-facing: only exposes OAuth flows and health checks.
+# /mcp/* is BLOCKED from the public internet — QwenPaw connects
+# directly to the container via localhost.
+# ─────────────────────────────────────────────────────────────────
+
+google-api.mcp.dg.linkpc.net {
+    # ── Public endpoints (allowed from anywhere) ──
+    # OAuth: /oauth/start redirects to Google, /oauth/callback receives callback
+    route /oauth/* {
+        reverse_proxy google-api:8000
+    }
+
+    # Health check: Docker/Caddy health probes
+    route /healthz {
+        reverse_proxy google-api:8000
+    }
+
+    # Root: redirect to healthz
+    route / {
+        reverse_proxy google-api:8000
+    }
+
+    # ── BLOCKED: /mcp/* (not exposed publicly) ──
+    # QwenPaw connects directly to http://127.0.0.1:8000/mcp/
+    # The bearer token middleware inside the bridge provides
+    # defense-in-depth even for localhost connections.
+    route /mcp/* {
+        respond "Forbidden" 403
+    }
+}
