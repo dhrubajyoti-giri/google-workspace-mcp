@@ -18,7 +18,7 @@ COPY --chown=appuser:appuser app/ ./app/
 COPY --chown=appuser:appuser tests/ ./tests/
 
 # ── Config directory (mounted secrets go here at runtime) ──
-RUN mkdir -p /config && chown appuser:appuser /config
+RUN mkdir -p /config /output && chown appuser:appuser /config /output
 
 # ── Run as non-root ──
 USER appuser
@@ -27,11 +27,13 @@ USER appuser
 ENV PYTHONUNBUFFERED=1
 ENV TZ=Asia/Kolkata
 ENV PYTHONPATH=/home/appuser/app
+ENV OUTPUT_DIR=/output
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -sf http://localhost:${MCP_PORT:-8000}/healthz || exit 1
 
-# Dynamic port via MCP_PORT env var (defaults to 8000)
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${MCP_PORT:-8000}"]
+# Dynamic port via MCP_PORT env var (defaults to 8000).
+# On startup: auto-generate MCP driver config to /output + stdout, then serve.
+CMD ["sh", "-c", "python -c 'from app.generate_config import generate; generate()' && exec uvicorn app.main:app --host 0.0.0.0 --port ${MCP_PORT:-8000}"]

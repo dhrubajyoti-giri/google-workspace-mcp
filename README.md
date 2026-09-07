@@ -1,8 +1,8 @@
 # Google Workspace MCP
 
 A standalone MCP server that handles its **own Google OAuth 2.0** and exposes
-purpose-built Google Workspace tools to any MCP client. Completely independent of
-via streamable_http — MCP clients connect here via `streamable_http`.
+purpose-built Google Workspace tools to standard MCP clients via
+`streamable_http` — any MCP client connects here via the MCP protocol.
 
 ## Architecture
 
@@ -16,10 +16,10 @@ via streamable_http — MCP clients connect here via `streamable_http`.
                             │  network: caddy + mcp  │  - client_secret.json
                             │                        │  - token.json
                             │                        │
- ┌──────────┐      :8088   │                        │
- │ QwenPaw │◄─────────────┤                        │
- │  :8088  │   MCP client │                        │
- └──────────┘             └────────┬───────────────┘
+ ┌──────────┐                          │
+ │  MCP     │◄─────────────────────────┤
+ │  Client │                          │
+ └──────────┘                          │
                                    │
                           ┌────────┴─────────┐
                           │ Google APIs      │
@@ -141,6 +141,12 @@ driver YAML. Since MCP clients may **not** interpolate `${ENV_VAR}` in the
 `endpoint.url` field (only in headers), the URL must be written
 literally into the driver config.
 
+> **Auto-generation on container start:** When the container boots, it
+> automatically generates the MCP driver config (JSON + YAML) to the
+> `OUTPUT_DIR` (`/output` by default, or `${OUTPUT_PATH}` volume mount),
+> and prints it to **stdout**. You can grab it from container logs or the
+> mounted volume — no separate script run needed.
+
 ### Option A — Automated (recommended)
 
 Use the config generation script to produce the driver YAML from `.env`:
@@ -176,7 +182,7 @@ qwenpaw daemon restart
 ### MCP Client Auth Model
 
 The bridge protects `/mcp/*` with a **bearer-token** middleware.
-the MCP client must send `Authorization: Bearer <token>` on every MCP request.
+The MCP client must send `Authorization: Bearer <token>` on every MCP request.
 The token must be **the same value** set as `AUTH_TOKEN` in both the
 bridge's `.env` (docker-compose) and QwenPaw's environment.
 

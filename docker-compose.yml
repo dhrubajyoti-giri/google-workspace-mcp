@@ -38,6 +38,9 @@ services:
       # Auth token — protects /mcp from unauthenticated access.
       # Must match AUTH_TOKEN in the MCP client's environment.
       AUTH_TOKEN: "${AUTH_TOKEN}"
+
+      # Output: auto-generated MCP driver config (JSON + YAML)
+      OUTPUT_DIR: "${OUTPUT_DIR:-/output}"
     volumes:
       # ── Secrets: client_secret.json + token.json ──
       # Host path: point this at your secrets directory.
@@ -45,6 +48,10 @@ services:
       #   client_secret.json  ← Google OAuth client credentials (NOT in image)
       #   token.json          ← auto-generated refresh token (NOT in image, NOT in Git)
       - ${VOLUME_PATH}:/config:rw
+      # ── Output: generated MCP driver config ──
+      # Config is also printed to stdout on every container start.
+      # Mount this if you want to persist it across restarts.
+      - ${OUTPUT_PATH:-/tmp/gws-output}:/output:rw
     networks:
       - caddy   # for Caddy HTTPS proxy
       - mcp     # for QwenPaw MCP client access
