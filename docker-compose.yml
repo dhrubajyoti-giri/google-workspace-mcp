@@ -36,7 +36,7 @@ services:
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
 
       # Auth token — protects /mcp from unauthenticated access.
-      # Must match AUTH_TOKEN in QwenPaw's environment.
+      # Must match AUTH_TOKEN in the MCP client's environment.
       AUTH_TOKEN: "${AUTH_TOKEN}"
     volumes:
       # ── Secrets: client_secret.json + token.json ──
