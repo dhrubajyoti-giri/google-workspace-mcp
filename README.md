@@ -51,6 +51,9 @@ bridge.
 # 1. Clone / copy project
 cd /root/workspace/projects/google-workspace-mcp
 
+# Optional: sync with GitHub remote (origin already configured)
+git remote -v  # shows: origin  https://github.com/dhrubajyoti-giri/google-workspace-mcp
+
 # 2. Place Google OAuth client_secret.json
 cp /path/to/client_secret.json secrets/client_secret.json
 
