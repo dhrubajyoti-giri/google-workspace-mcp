@@ -35,9 +35,17 @@ services:
       # Logging
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
 
-      # Auth token — protects /mcp from unauthenticated access.
-      # Must match AUTH_TOKEN in the MCP client's environment.
+      # Auth token — protects ALL endpoints except /healthz, /, /oauth/callback.
+      # Single-user mode: set AUTH_TOKEN (or MCP_BEARER_TOKEN) to your secret.
+      # Multi-user mode: leave AUTH_TOKEN empty and set MCP_USER_MAP instead.
       AUTH_TOKEN: "${AUTH_TOKEN}"
+
+      # Multi-user token → user mapping (JSON string).
+      # Example:
+      # MCP_USER_MAP='{"token-alice": {"user_id":"alice","scopes":["gmail.modify","drive"]}, "token-bob": {"user_id":"bob","scopes":["documents.readonly"]}}'
+      # When set, enables per-user OAuth + per-user token storage (token-{user_id}.json).
+      # Each token is a bearer credential for a different MCP client / user.
+      MCP_USER_MAP: "${MCP_USER_MAP}"
 
       # Output: auto-generated MCP driver config (JSON + YAML)
       OUTPUT_DIR: "${OUTPUT_DIR:-/output}"

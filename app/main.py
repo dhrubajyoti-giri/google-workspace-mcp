@@ -1,11 +1,12 @@
 """Google Workspace MCP — main FastAPI application.
 
 Exposes:
-  GET  /healthz        — health check
-  GET  /oauth/start     — start OAuth flow (redirect to Google)
-  GET  /oauth/callback  — OAuth callback
-  GET  /oauth/status    — oauth status (no secrets exposed)
-  POST /mcp/*           — MCP streamable HTTP endpoint
+  GET  /healthz        — health check (public)
+  GET  /                  — service info (public)
+  GET  /oauth/start       — start OAuth flow (requires bearer token)
+  GET  /oauth/callback    — OAuth callback (public — Google redirects here)
+  GET  /oauth/status      — oauth status (requires bearer token)
+  POST /mcp/*             — MCP streamable HTTP endpoint (requires bearer token)
 """
 from __future__ import annotations
 
@@ -19,6 +20,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.config import settings
+from app.context import user_id as user_id_ctx
+
+# ── Public endpoints (no bearer token required) ────────────────
+# /oauth/callback MUST be public — Google redirects here with the auth code.
+# /healthz is public for monitoring (Docker healthcheck).
+# / is public for service discovery.
+PUBLIC_PATHS = frozenset({"/healthz", "/", "/oauth/callback"})
 
 # ── Protocol version helper ────────────────────────────────────
 def _get_supported_protocol_versions(client_version: str | None = None) -> list[str]:
@@ -197,8 +205,9 @@ from app.oauth import router as oauth_router
 app.include_router(oauth_router)
 
 # ── MCP mount ────────────────────────────────────────────────
-# Bearer-token middleware: protects /mcp from unauthenticated access.
-# Anyone with the token can invoke MCP tools; without it, 401.
+# Bearer-token auth is handled by _bearer_guard middleware above, which
+# protects ALL endpoints except PUBLIC_PATHS. The MCP mount only needs the
+# ServerDiscoverMiddleware wrapper.
 mcp_asgi = create_mcp_asgi()
 
 # Wrap with ServerDiscoverMiddleware to handle QwenPaw's non-standard
@@ -207,22 +216,46 @@ mcp_asgi = ServerDiscoverMiddleware(mcp_asgi)
 
 
 @app.middleware("http")
-async def _mcp_bearer_guard(request: Request, call_next):
-    """Require Bearer token on /mcp/*; leave /oauth/* and /healthz open."""
-    if request.url.path.startswith("/mcp"):
-        expected = settings.mcp_bearer_token
-        if not expected:
-            # No token configured — log once and allow (dev mode)
-            log.warning("MCP_BEARER_TOKEN not set — /mcp is open!")
-            # fall through
-        else:
-            auth = request.headers.get("Authorization", "")
-            if not auth or auth != f"Bearer {expected}":
-                return JSONResponse(
-                    {"detail": "Unauthorized — valid Bearer token required"},
-                    status_code=401,
-                )
-    return await call_next(request)
+async def _bearer_guard(request: Request, call_next):
+    """Protect all endpoints except PUBLIC_PATHS with bearer token."""
+    path = request.url.path
+    if path in PUBLIC_PATHS:
+        return await call_next(request)
+
+    # ── All other endpoints require bearer token ──
+    auth = request.headers.get("Authorization", "")
+    if not auth or not auth.startswith("Bearer "):
+        return JSONResponse(
+            {"detail": "Bearer token required"},
+            status_code=401,
+        )
+
+    token = auth[len("Bearer "):]
+
+    if settings.is_multi_user:
+        # Multi-user: look up user from MCP_USER_MAP
+        user_info = settings.mcp_user_map.get(token)
+        if not user_info:
+            return JSONResponse(
+                {"detail": "Invalid bearer token"},
+                status_code=403,
+            )
+        uid = user_info["user_id"]
+    else:
+        # Single-user: check against AUTH_TOKEN
+        if not settings.mcp_bearer_token or token != settings.mcp_bearer_token:
+            return JSONResponse(
+                {"detail": "Invalid bearer token"},
+                status_code=403,
+            )
+        uid = "default"
+
+    # Set user context — propagates to MCP tools via contextvar
+    ctx_token = user_id_ctx.set(uid)
+    try:
+        return await call_next(request)
+    finally:
+        user_id_ctx.reset(ctx_token)
 
 
 app.mount("/mcp", mcp_asgi)
@@ -232,16 +265,23 @@ app.mount("/mcp", mcp_asgi)
 
 @app.get("/healthz")
 def healthz():
-    """Health check — reports service, MCP, and OAuth status."""
+    """Health check — reports service, MCP, and OAuth status.
+
+    Public endpoint (no bearer token required). In multi-user mode,
+    reports aggregate status across all configured users.
+    """
     from app.google_client import get_google_client
     client = get_google_client()
     has_token = client.has_token()
 
+    user_count = len(settings.mcp_user_map) if settings.is_multi_user else 1
     return JSONResponse({
         "status": "ok" if has_token else "degraded",
         "version": settings.mcp_server_version,
         "mcp_enabled": True,
         "oauth_configured": has_token,
+        "multi_user": settings.is_multi_user,
+        "configured_users": user_count,
         "oauth_start": f"{os.environ.get('EXTERNAL_URL', settings.external_url)}/oauth/start",
     })
 

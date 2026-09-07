@@ -20,11 +20,12 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
 from app.config import settings
+from app.context import current_user_id, user_id as user_id_ctx
 
 log = logging.getLogger("google-workspace-mcp")
 
 # ── In-memory state store (transient) ──────────────────────────
-# Maps state → {redirect_uri, scopes, created_at}
+# Maps state → {redirect_uri, scopes, user_id, created_at, flow}
 _state_store: dict[str, dict[str, Any]] = {}
 _STATE_TTL = 300  # 5 minutes
 
@@ -59,9 +60,15 @@ def get_flow(scopes: list[str] | None = None) -> Flow:
     return flow
 
 
-def get_authorization_url(scopes: list[str] | None = None) -> tuple[str, str]:
-    """Return (auth_url, state) for the given scopes."""
+def get_authorization_url(scopes: list[str] | None = None, user_id: str | None = None) -> tuple[str, str]:
+    """Return (auth_url, state) for the given scopes.
+
+    In multi-user mode, ``user_id`` is stored in the state so the callback
+    can route the token to the correct per-user file.
+    In single-user mode, user_id is None → treated as "default".
+    """
     _cleanup_states()
+    effective_user = user_id or "default"
     flow = get_flow(scopes)
     auth_url, state = flow.authorization_url(
         access_type="offline",       # need refresh_token for auto-refresh
@@ -73,9 +80,10 @@ def get_authorization_url(scopes: list[str] | None = None) -> tuple[str, str]:
         "created_at": time.time(),
         "redirect_uri": get_redirect_uri(),
         "scopes": scopes or settings.google_scopes,
+        "user_id": effective_user,
         "flow": flow,  # Keep the Flow (incl. PKCE code_verifier) for token exchange
     }
-    log.info("OAuth flow started — state %s..., auth URL generated", state[:8])
+    log.info("OAuth flow started — state %s..., user=%s, scopes=%d", state[:8], effective_user, len(scopes or settings.google_scopes))
     return auth_url, state
 
 
@@ -147,7 +155,7 @@ def exchange_code(code: str, state: str) -> dict[str, Any]:
         "scopes": list(creds.scopes) if creds.scopes else [],
     }
     log.info("OAuth token stored — scopes: %s", ", ".join(token_data["scopes"][:3]))
-    return token_data
+    return token_data, stored.get("user_id", "default")
 
 
 # ── FastAPI router ─────────────────────────────────────────────
@@ -157,16 +165,37 @@ router = APIRouter(prefix="/oauth")
 
 @router.get("/start")
 def start_oauth():
-    """Start the Google OAuth 2.0 flow."""
-    auth_url, state = get_authorization_url()
+    """Start the Google OAuth 2.0 flow.
+
+    Requires bearer token (to identify the user). In multi-user mode,
+    uses the requesting user's configured scopes. The user_id is embedded
+    in the OAuth state so /callback can store the token to the correct
+    per-user file.
+    """
+    uid = current_user_id()
+    if uid is None:
+        uid = "default"
+
+    # In multi-user mode, use the user's specific scopes if defined;
+    # otherwise fall back to the global default scopes.
+    user_scopes = None
+    if settings.is_multi_user:
+        user_scopes = settings.user_scopes(uid)
+
+    auth_url, state = get_authorization_url(scopes=user_scopes, user_id=uid)
     return RedirectResponse(url=auth_url)
 
 
 @router.get("/callback")
 def callback(code: str, state: str):
-    """Handle Google's OAuth callback."""
+    """Handle Google's OAuth callback.
+
+    Public endpoint — Google redirects here with ?code=...&state=...
+    The user_id is recovered from the stored state (set during /oauth/start)
+    and used to route the token to the correct per-user file.
+    """
     try:
-        token_data = exchange_code(code, state)
+        token_data, uid = exchange_code(code, state)
     except HTTPException:
         raise
     except RefreshError as e:
@@ -175,23 +204,27 @@ def callback(code: str, state: str):
         log.error("OAuth callback error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="OAuth exchange failed")
 
-    # Persist token via GoogleClient
+    # Set the user context so get_google_client() returns the right client
     from app.google_client import get_google_client
-    client = get_google_client()
-    from google.oauth2.credentials import Credentials
-    creds = Credentials(
-        token=token_data["token"],
-        refresh_token=token_data["refresh_token"],
-        token_uri=token_data["token_uri"],
-        client_id=token_data["client_id"],
-        client_secret=token_data["client_secret"],
-        scopes=token_data["scopes"],
-    )
-    client.store_new_credentials(creds)
+    ctx = user_id_ctx.set(uid)
+    try:
+        client = get_google_client()
+        creds = Credentials(
+            token=token_data["token"],
+            refresh_token=token_data["refresh_token"],
+            token_uri=token_data["token_uri"],
+            client_id=token_data["client_id"],
+            client_secret=token_data["client_secret"],
+            scopes=token_data["scopes"],
+        )
+        client.store_new_credentials(creds)
+    finally:
+        user_id_ctx.reset(ctx)
 
     return JSONResponse({
         "status": "success",
         "message": "Google OAuth completed. Token stored securely.",
+        "user_id": uid,
         "scopes": token_data["scopes"],
     })
 
@@ -199,7 +232,45 @@ def callback(code: str, state: str):
 @router.get("/status")
 def oauth_status():
     """Report OAuth status without exposing tokens."""
+    uid = current_user_id() or "default"
     from app.google_client import get_google_client
-    client = get_google_client()
-    has_token = client.has_token()
-    return {"authenticated": has_token, "credentials_dir": settings.google_credentials_dir}
+    ctx = user_id_ctx.set(uid)
+    try:
+        client = get_google_client()
+        has_token = client.has_token()
+    finally:
+        user_id_ctx.reset(ctx)
+    return {"authenticated": has_token, "credentials_dir": settings.google_credentials_dir, "user_id": uid}
+
+
+@router.post("/revoke")
+def revoke_token():
+    """Clear the stored Google OAuth token for the current user.
+
+    Requires bearer token. Deletes the per-user token file. The user
+    will need to re-authorize at /oauth/start afterward.
+    """
+    uid = current_user_id()
+    if uid is None:
+        uid = "default"
+    from app.google_client import get_google_client
+    ctx = user_id_ctx.set(uid)
+    try:
+        client = get_google_client()
+        token_store = client.token_store
+        token_exists = token_store.exists()
+        if token_exists:
+            token_store.delete()
+            log.info("Token revoked for user %s", uid)
+            return JSONResponse({
+                "status": "success",
+                "user_id": uid,
+                "message": f"Token for user {uid} revoked. Re-authorize at /oauth/start.",
+            })
+        return JSONResponse({
+            "status": "success",
+            "user_id": uid,
+            "message": f"No token found for user {uid} — nothing to revoke.",
+        })
+    finally:
+        user_id_ctx.reset(ctx)

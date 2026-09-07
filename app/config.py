@@ -96,10 +96,59 @@ class Settings(BaseSettings):
     mcp_server_version: str = "1.0.0"
 
     # ── MCP bearer token (security: only the MCP client knows this) ──
+    # Single-user mode (backward compat): a single token string.
+    # Multi-user mode: MCP_USER_MAP overrides this — each token maps to a
+    # user with their own Google credentials and scopes.
     mcp_bearer_token: str = Field(
         default="",
         validation_alias=AliasChoices("AUTH_TOKEN", "MCP_BEARER_TOKEN", "MCP_AUTH_TOKEN"),
     )
+
+    # ── Multi-user token → user mapping ────────────────────────────────
+    # JSON string: {"bearer_token": {"user_id": "alice", "scopes": [...]}, ...}
+    # When set, enables per-user OAuth + per-user token storage.
+    # Each user's token is stored at /config/token-{user_id}.json.
+    # When unset/empty, falls back to single-user mode (mcp_bearer_token + token.json).
+    mcp_user_map_raw: str = Field(default="", validation_alias=AliasChoices("MCP_USER_MAP"))
+
+    @property
+    def mcp_user_map(self) -> dict[str, dict[str, Any]]:
+        """Parse MCP_USER_MAP into {token: {"user_id": str, "scopes": [str]}}."""
+        if not self.mcp_user_map_raw:
+            return {}
+        try:
+            import json
+            raw = json.loads(self.mcp_user_map_raw)
+            result: dict[str, dict[str, Any]] = {}
+            for token, info in raw.items():
+                if isinstance(info, str):
+                    # Shorthand: {"token": "user_id"} — uses default scopes
+                    result[token] = {"user_id": info, "scopes": None}
+                elif isinstance(info, dict):
+                    result[token] = {
+                        "user_id": info.get("user_id", ""),
+                        "scopes": info.get("scopes") or None,
+                    }
+                else:
+                    raise ValueError(f"Invalid MCP_USER_MAP entry: {token}")
+            return result
+        except (json.JSONDecodeError, ValueError) as e:
+            log.warning("Failed to parse MCP_USER_MAP: %s", e)
+            return {}
+
+    @property
+    def is_multi_user(self) -> bool:
+        """True when MCP_USER_MAP is configured (multi-user mode)."""
+        return bool(self.mcp_user_map)
+
+    def user_scopes(self, user_id: str) -> list[str] | None:
+        """Return scopes for a user_id, or None to use the global default."""
+        for token, info in self.mcp_user_map.items():
+            if info["user_id"] == user_id:
+                if info["scopes"] is not None:
+                    return info["scopes"] if isinstance(info["scopes"], list) else _parse_scopes(info["scopes"])
+                return None  # use global default scopes
+        return None
 
     # ── Misc ──
     tz: str = Field(default="Asia/Kolkata", validation_alias=AliasChoices("TZ", "TZ_VALUE"))

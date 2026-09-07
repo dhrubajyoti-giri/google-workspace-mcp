@@ -14,12 +14,15 @@ purpose-built Google Workspace tools to standard MCP clients via
                             │                        │
                             │  internal Docker       │  /config (secrets)
                             │  network: caddy + mcp  │  - client_secret.json
-                            │                        │  - token.json
+                            │                        │  - token-{user}.json (per-user)
                             │                        │
- ┌──────────┐                          │
- │  MCP     │◄─────────────────────────┤
- │  Client │                          │
- └──────────┘                          │
+                            │                        │
+ ┌──────────┐      :8088   │                        │
+ │  MCP     │◄─────────────┤                        │
+ │ Client  │   Bearer token │                        │
+ │  (QwenPaw│   on every   │                        │
+ │   :8088) │   request    │                        │
+ └──────────┘             └────────┬───────────────┘
                                    │
                           ┌────────┴─────────┐
                           │ Google APIs      │
@@ -30,9 +33,18 @@ purpose-built Google Workspace tools to standard MCP clients via
 
 **Key difference from gws-mcp:** This bridge owns its OAuth flow and stores
 credentials in `/config` — the MCP client never sees tokens, client secrets, or
-authorization codes. The OAuth callback goes through the MCP client's domain
-(`https://<hostname>/api/mcp/oauth/callback`) which Caddy routes to the
-bridge.
+authorization codes. The OAuth callback goes to the bridge's own domain
+(`https://<hostname>/oauth/callback`).
+
+### Security Layers
+
+1. **Bearer token** — Protects all endpoints except `/healthz`, `/`,
+   `/oauth/callback`. Each MCP client knows a bearer token that maps to a
+   specific user.
+2. **Caddy reverse proxy** — HTTPS termination + network isolation.
+3. **Google OAuth consent** — Scoped to the GCP project's authorized APIs.
+
+---
 
 ## Prerequisites
 
@@ -75,29 +87,133 @@ docker compose up -d --build
 | Variable | Default | Description |
 |---|---|---|
 | `EXTERNAL_URL` | `https://google-api.mcp.dg.linkpc.net` | Public HTTPS URL for OAuth callback |
-| `MCP_PORT` | `8000` | Host + container port (change in `.env` to relocate) |
+| `MCP_PORT` | `8000` | Host + container port |
 | `GOOGLE_CLIENT_SECRET_FILE` | `/config/client_secret.json` | Mount path for OAuth credentials |
-| `GOOGLE_TOKEN_FILE` | `/config/token.json` | Auto-generated refresh token |
-| `GOOGLE_SCOPES` | *(read-only default)* | Comma-separated Google API scopes |
+| `GOOGLE_TOKEN_FILE` | `/config/token.json` | Token file path (base; per-user suffix appended in multi-user mode) |
+| `GOOGLE_SCOPES` | *(read-only default)* | Comma-separated Google API scopes (global default) |
+| `AUTH_TOKEN` | *(empty)* | Single-user bearer token (used when `MCP_USER_MAP` is unset) |
+| `MCP_USER_MAP` | *(empty)* | JSON: bearer token → `{"user_id","scopes"}`. Enables multi-user mode. |
+
+---
+
+## Authentication Model
+
+### Single-User Mode (default)
+
+Set `AUTH_TOKEN` in `.env`. All MCP requests must include
+`Authorization: Bearer <AUTH_TOKEN>`. One Google token file at
+`/config/token.json`.
+
+### Multi-User Mode
+
+Set `MCP_USER_MAP` in `.env` (overrides `AUTH_TOKEN`). Each entry maps a
+bearer token to a user with their own Google credentials and scopes:
+
+```json
+{
+  "token-full-access":   {"user_id": "alice", "scopes": ["gmail.modify","drive","documents","spreadsheets","calendar","presentations"]},
+  "token-restricted":    {"user_id": "bob",   "scopes": ["documents.readonly"]}
+}
+```
+
+Per-user behavior:
+- Each user has a **separate Google OAuth flow** (`/oauth/start` with their bearer token)
+- Tokens stored at `/config/token-{user_id}.json` (e.g. `token-alice.json`, `token-bob.json`)
+- Each MCP client uses **their own bearer token** → routes to their own Google credentials
+- Users can have **different scopes** (full access vs restricted)
+
+**OAuth flow per user:**
+
+```
+1. User visits /oauth/start with their bearer token
+2. Bridge identifies the user from the token → uses their configured scopes
+3. Google OAuth → callback → token stored to token-{user_id}.json
+4. User's MCP client calls /mcp/ with their bearer token → tools execute
+   as that Google user with that user's scopes
+```
+
+### Bearer Token Middleware
+
+All endpoints require a valid bearer token **except**:
+
+| Endpoint | Public? | Why |
+|---|---|---|
+| `/healthz` | ✅ | Monitoring / Docker healthcheck |
+| `/` | ✅ | Service info / discovery |
+| `/oauth/callback` | ✅ | Google redirects here — no token available yet |
+| `/oauth/start` | ❌ | Needs token to identify the user + select scopes |
+| `/oauth/status` | ❌ | Shows current user's token status |
+| `/oauth/revoke` | ❌ | Deletes current user's token |
+| `/mcp/*` | ❌ | MCP protocol — tools execute as the authenticated user |
+
+---
 
 ## OAuth Flow
 
+### Single-User Mode
+
 ```
-1. User (or MCP client) → GET /oauth/start
+1. (Bearer token required) → GET /oauth/start
 2. Bridge → redirects to Google consent screen
 3. Google → redirects to /oauth/callback?code=...&state=...
 4. Bridge → exchanges code for token (incl. refresh_token)
-5. Bridge → saves token.json to /config (0600 permissions)
+5. Bridge → saves /config/token.json (0600 permissions)
 6. Bridge → auto-refreshes access tokens as needed
 ```
 
-**First run:** Visit `https://<your-domain>/oauth/start` to authorize.
+**First run:** Send a request with your bearer token:
+```bash
+curl -H "Authorization: Bearer your-secret-token" http://localhost:8000/oauth/start
+# → follow redirect to Google, then /oauth/callback
+```
+
+### Multi-User Mode
+
+```
+1. User A: GET /oauth/start with Bearer token-alice
+2. Bridge → identifies user "alice", requests alice's scopes → Google consent
+3. Google → redirects to /oauth/callback (public, no token needed)
+4. Bridge → looks up user_id from OAuth state → stores token to token-alice.json
+5. User A's MCP client → POST /mcp/ with Bearer token-alice → tools run as alice
+```
+
+### Clearing Authorization
+
+To revoke a user's Google token (no manual file deletion needed):
+
+```bash
+# Multi-user
+curl -X POST -H "Authorization: Bearer token-alice" http://localhost:8000/oauth/revoke
+
+# Single-user
+curl -X POST -H "Authorization: Bearer your-secret-token" http://localhost:8000/oauth/revoke
+```
+
+Returns: `{"status":"success","user_id":"alice","message":"Token for user alice revoked. Re-authorize at /oauth/start."}`
+
+---
 
 ## MCP Transport
 
 - **Type:** Streamable HTTP (MCP protocol v1)
 - **Endpoint:** `https://<your-domain>/mcp` (MCP clients connect here; redirect from `/mcp` → `/mcp/` handled automatically)
-- **MCP client config:** `drivers/mcp/google-workspace-mcp.yaml` → install into QwenPaw runtime's `drivers/mcp/`
+- **Bearer token:** Required on all `/mcp/*` requests
+
+### Config Auto-Generation
+
+When the container starts, it **automatically** generates the MCP driver
+config (JSON + YAML) to `/output` and prints it to **stdout**:
+
+```bash
+# View from container logs
+docker compose logs google-workspace-mcp | head -20
+
+# Grab from mounted volume
+cat /tmp/gws-output/mcp-config.json        # single-user
+cat /tmp/gws-output/mcp-config-alice.json   # multi-user (per-user)
+```
+
+---
 
 ## Tools
 
@@ -132,65 +248,46 @@ docker compose up -d --build
 | `calendar_update_event(...)` | Update a calendar event |
 | `calendar_delete_event(calendar_id, event_id)` | Delete a calendar event |
 | `slides_create(title)` | Create a new presentation |
-| `slides_update(presentation_id, requests_json)` | Batch update slides
+| `slides_update(presentation_id, requests_json)` | Batch update slides |
+
+---
 
 ## Connecting MCP Clients
 
 The bridge is a standalone MCP server — a standard MCP client connects via a
-driver YAML. Since MCP clients may **not** interpolate `${ENV_VAR}` in the
-`endpoint.url` field (only in headers), the URL must be written
-literally into the driver config.
+driver config. Since MCP clients may **not** interpolate `${ENV_VAR}` in the
+`endpoint.url` field (only in headers), the URL is written literally into the
+config.
 
 > **Auto-generation on container start:** When the container boots, it
 > automatically generates the MCP driver config (JSON + YAML) to the
-> `OUTPUT_DIR` (`/output` by default, or `${OUTPUT_PATH}` volume mount),
-> and prints it to **stdout**. You can grab it from container logs or the
-> mounted volume — no separate script run needed.
+> `OUTPUT_DIR` (`/output`, or `${OUTPUT_PATH}` volume mount) and prints it to
+> **stdout**. No separate script run needed.
 
-### Option A — Automated (recommended)
-
-Use the config generation script to produce the driver YAML from `.env`:
+### Single-User: Install the Config
 
 ```bash
-# In the bridge project directory
-./scripts/gen-mcp-driver-config.sh
-# → reads MCP_PORT + AUTH_TOKEN from .env
-# → prints the config to console
-# → saves to drivers/mcp/google-workspace-mcp-generated.yaml
-#   (NOT auto-installed — you do it manually)
-```
-
-Then manually copy the generated config to your MCP client and restart:
-
-```bash
-cp drivers/mcp/google-workspace-mcp-generated.yaml \
+# From the output volume or stdout
+cp /tmp/gws-output/mcp-config.json \
    /app/working/workspaces/default/drivers/mcp/google-workspace-mcp.yaml
 qwenpaw daemon restart
 ```
 
-### Option B — Manual
+### Multi-User: Install One Config Per User
 
-1. Set `AUTH_TOKEN` in the bridge `.env` (e.g. `AUTH_TOKEN=your-secret-here`)
-2. Set the **same** `AUTH_TOKEN` as an environment variable in QwenPaw's
-   runtime (same value as in the bridge `.env`)
-3. Copy `drivers/mcp/google-workspace-mcp.yaml` to your MCP client's
-   `data/drivers/mcp/`
-4. Replace `__MCP_PORT__` in the YAML with the port from your `.env`
-   (default `8000`) — e.g. `http://127.0.0.1:8000/mcp/`
-5. Restart your MCP client
+```bash
+# Copy each user's config to QwenPaw
+cp /tmp/gws-output/mcp-config-alice.yaml \
+   /app/working/workspaces/default/drivers/mcp/google-workspace-mcp-alice.yaml
+cp /tmp/gws-output/mcp-config-bob.yaml \
+   /app/working/workspaces/default/drivers/mcp/google-workspace-mcp-bob.yaml
+qwenpaw daemon restart
+```
 
-### MCP Client Auth Model
+Each config uses a different bearer token — the bridge routes tool calls to the
+correct Google account based on which token is presented.
 
-The bridge protects `/mcp/*` with a **bearer-token** middleware.
-The MCP client must send `Authorization: Bearer <token>` on every MCP request.
-The token must be **the same value** set as `AUTH_TOKEN` in both the
-bridge's `.env` (docker-compose) and QwenPaw's environment.
-
-| Layer | What the MCP client sees |
-|---|---|
-| Endpoint | `http://127.0.0.1:<MCP_PORT>/mcp/` (localhost only) |
-| Auth header | `Authorization: Bearer ${AUTH_TOKEN}` (QwenPaw env interpolation) |
-| Google OAuth | Fully opaque — the bridge exchanges codes/tokens internally; the MCP client never sees Google credentials |
+---
 
 ## Testing
 
@@ -199,15 +296,19 @@ bridge's `.env` (docker-compose) and QwenPaw's environment.
 pip install -r requirements.txt pytest
 pytest tests/ -v
 
-# Health check
+# Health check (public endpoint)
 curl http://localhost:${MCP_PORT:-8000}/healthz
 
-# OAuth status (check if token is stored)
-curl http://localhost:${MCP_PORT:-8000}/oauth/status
+# OAuth status (requires bearer token)
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:${MCP_PORT:-8000}/oauth/status
 
-# MCP protocol test (requires EXTERNAL_URL host header for transport security)
+# Revoke token (requires bearer token)
+curl -X POST -H "Authorization: Bearer YOUR_TOKEN" http://localhost:${MCP_PORT:-8000}/oauth/revoke
+
+# MCP protocol test
 curl -H "Host: $(grep EXTERNAL_URL .env | cut -d= -f2-)" \
      -H "Accept: application/json, text/event-stream" \
+     -H "Authorization: Bearer YOUR_TOKEN" \
      -X POST http://localhost:${MCP_PORT:-8000}/mcp/ \
      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}'
 ```
@@ -216,17 +317,18 @@ curl -H "Host: $(grep EXTERNAL_URL .env | cut -d= -f2-)" \
 
 | Issue | Fix |
 |---|---|
-| `OAuth credentials lack required scopes` | Re-authorize: delete `/config/token.json`, visit `/oauth/start` |
+| `OAuth credentials lack required scopes` | Re-authorize: `curl -X POST -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8000/oauth/revoke`, then `/oauth/start` |
 | `client_secret.json not found` | Place it in `secrets/client_secret.json` before starting |
-| Check the driver config endpoint URL and bearer token | Check `drivers/mcp/google-workspace-mcp.yaml` endpoint URL |
+| `401 Unauthorized` on `/mcp` | Check bearer token matches `AUTH_TOKEN` (single-user) or a key in `MCP_USER_MAP` (multi-user) |
+| Token file location | Single-user: `/config/token.json` · Multi-user: `/config/token-{user_id}.json` |
 | Caddy 502 Bad Gateway | Verify container is running: `docker compose ps` |
 
 ## Phases
 
 - [x] **Phase 1** — Infrastructure (Docker, FastAPI, healthz, config)
-- [x] **Phase 2** — Auth (OAuth 2.0 flow, token store, auto-refresh)
+- [x] **Phase 2** — Auth (OAuth 2.0 flow, token store, auto-refresh, `/oauth/revoke`)
 - [x] **Phase 3** — Read tools (Gmail, Drive, Docs, Sheets, Calendar, Slides)
-- [x] **Phase 4** — MCP driver config + Caddy routing
+- [x] **Phase 4** — MCP driver config + Caddy routing + bearer-token middleware
 - [x] **Phase 5** — Write tools (create, update, delete)
-- [~] **Phase 6** — Additional APIs (Tasks, Contacts, Chat) — scopes configured in `.env`; tool implementations pending
+- [x] **Phase 6** — Multi-user support (per-user tokens, scopes, bearer token routing)
 - [~] **Phase 7** — E2E testing — 30 unit tests pass; full OAuth + Docker + client integration pending host deployment
