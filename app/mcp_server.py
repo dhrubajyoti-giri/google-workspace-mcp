@@ -23,6 +23,28 @@ from app.tools.slides import slides_get as _slides_get, slides_create as _slides
 
 log = logging.getLogger("google-api-bridge")
 
+# ── Protocol version compatibility patch ────────────────────────────
+# QwenPaw's MCP client advertises protocol version "2026-07-28", but the
+# installed `mcp` SDK (v1.29.1, pinned <2.0 by QwenPaw's constraint) only
+# lists up to "2025-11-25" in SUPPORTED_PROTOCOL_VERSIONS.
+#
+# Without this patch, StreamableHTTPSessionManager._validate_protocol_version()
+# returns HTTP 400 for every request with the "2026-07-28" header, and QwenPaw's
+# client falls back to legacy/SSE mode where tools aren't registered in the
+# active session.
+#
+# With this patch, 2026-07-28 is accepted during _validate_protocol_version,
+# AND the ServerDiscoverMiddleware in main.py responds to QwenPaw's
+# non-standard "server/discover" method with the supported versions list
+# — allowing the modern stateless transport to connect directly.
+try:
+    from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+    if "2026-07-28" not in SUPPORTED_PROTOCOL_VERSIONS:
+        SUPPORTED_PROTOCOL_VERSIONS.append("2026-07-28")
+        log.info("Added protocol version 2026-07-28 to SUPPORTED_PROTOCOL_VERSIONS for QwenPaw compatibility")
+except Exception:
+    pass
+
 # streamable_http_path="/" so the Starlette ASGI app routes at "/" internally;
 # when FastAPI mounts it at "/mcp", the full path becomes /mcp (not /mcp/mcp).
 _domain = urlparse(settings.external_url).hostname or "localhost"

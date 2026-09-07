@@ -9,14 +9,105 @@ Exposes:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.config import settings
+
+# ── Protocol version helper ────────────────────────────────────
+def _get_supported_protocol_versions() -> list[str]:
+    """Return supported MCP protocol versions, including QwenPaw's 2026-07-28.
+
+    Reads from the (patched) mcp SDK's SUPPORTED_PROTOCOL_VERSIONS list.
+    The patch in mcp_server.py adds 2026-07-28 so this returns the full set.
+    """
+    from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+    versions = list(SUPPORTED_PROTOCOL_VERSIONS)
+    if "2026-07-28" not in versions:
+        versions.append("2026-07-28")
+    return versions
+
+
+class ServerDiscoverMiddleware:
+    """Intercept QwenPaw's non-standard ``server/discover`` JSON-RPC method.
+
+    QwenPaw's MCP client sends a ``server/discover`` JSON-RPC request before
+    calling ``initialize``, to discover the server's supported protocol versions.
+    The MCP SDK (v1.29.1) does **not** implement this method — it returns an
+    error for unknown methods, which prevents the modern stateless transport
+    from being used (QwenPaw sees the error and does not fall back to legacy).
+
+    This middleware intercepts ``server/discover`` requests **before** they
+    reach the MCP SDK and returns the supported protocol versions — including
+    ``2026-07-28`` (which the protocol version patch in ``mcp_server.py``
+    adds to ``SUPPORTED_PROTOCOL_VERSIONS`` so the subsequent ``initialize``
+    call's header validation also succeeds).
+
+    For all other requests, the body is re-injected and the request is
+    passed through to the MCP ASGI app unchanged.
+    """
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any):
+        if scope["type"] != "http" or scope.get("method", "") != "POST":
+            await self.app(scope, receive, send)
+            return
+
+        # ── Read the full request body ──
+        body = b""
+        more = True
+        while more:
+            message = await receive()
+            if message["type"] == "http.request":
+                body += message.get("body", b"")
+                more = message.get("more_body", False)
+            elif message["type"] == "http.disconnect":
+                # Client disconnected before sending body — pass through
+                break
+
+        # ── Check if this is a server/discover request ──
+        try:
+            data = json.loads(body)
+            if isinstance(data, dict) and data.get("method") == "server/discover":
+                supported = _get_supported_protocol_versions()
+                response_body = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": data.get("id"),
+                    "result": {"supportedVersions": supported},
+                })
+                await send({
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"mcp-protocol-version", b"2026-07-28"),
+                    ],
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": response_body.encode(),
+                })
+                return
+        except (json.JSONDecodeError, UnicodeDecodeError, KeyError):
+            pass
+
+        # ── Re-inject body for the MCP ASGI app ──
+        async def _receive():
+            return {
+                "type": "http.request",
+                "body": body,
+                "more_body": False,
+            }
+
+        await self.app(scope, _receive, send)
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -70,6 +161,10 @@ app.include_router(oauth_router)
 # Bearer-token middleware: protects /mcp from unauthenticated access.
 # Anyone with the token can invoke MCP tools; without it, 401.
 mcp_asgi = create_mcp_asgi()
+
+# Wrap with ServerDiscoverMiddleware to handle QwenPaw's non-standard
+# server/discover JSON-RPC method (the MCP SDK doesn't implement it).
+mcp_asgi = ServerDiscoverMiddleware(mcp_asgi)
 
 
 @app.middleware("http")
