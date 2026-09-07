@@ -1,43 +1,84 @@
-"""Tests for the OAuth flow: state generation, validation, PKCE."""
-import json
+"""Tests for the OAuth flow: state store management, code exchange, cleanup."""
+import time
 from unittest.mock import patch, MagicMock
 
-from app.oauth import get_authorization_url, exchange_code, _state_store, _cleanup_states
+from app.oauth import _google_state_store, _cleanup_stores, _exchange_code
+from app.oauth_provider import provider, registry
 
 
-def test_get_authorization_url_returns_url_and_state():
-    with patch("app.oauth.settings") as mock_settings:
-        mock_settings.google_client_secret_file = "/dev/null"
-        mock_settings.external_url = "https://test.example.com"
-        mock_settings.google_scopes = ["openid", "email"]
+def test_cleanup_stores_removes_expired_entries():
+    """Expired entries in both stores should be removed by _cleanup_stores."""
+    _google_state_store.clear()
 
-        with patch("app.oauth.Flow") as mock_flow_cls:
-            mock_flow = MagicMock()
-            mock_flow.authorization_url.return_value = ("https://accounts.google.com/o/oauth2/auth?...", "test_state_123")
-            mock_flow_cls.from_client_secrets_file.return_value = mock_flow
+    # Add an expired entry (expires_at in the past)
+    _google_state_store["expired"] = {
+        "flow": MagicMock(),
+        "rid": "expired_rid",
+        "step": "identify",
+        "created_at": 0,
+        "expires_at": 0,
+    }
+    # Add a valid entry (expires_at in the future)
+    _google_state_store["valid"] = {
+        "flow": MagicMock(),
+        "rid": "valid_rid",
+        "step": "identify",
+        "created_at": time.time(),
+        "expires_at": time.time() + 600,
+    }
 
-            auth_url, state = get_authorization_url()
+    _cleanup_stores()
 
-            assert auth_url.startswith("https://accounts.google.com")
-            assert state != ""
-            assert state in _state_store
-            assert _state_store[state]["scopes"] == ["openid", "email"]
-            # Flow object must be stored for PKCE code_verifier reuse
-            assert "flow" in _state_store[state]
-            assert _state_store[state]["flow"] is mock_flow
+    assert "expired" not in _google_state_store
+    assert "valid" in _google_state_store
+    _google_state_store.clear()
 
 
 def test_exchange_code_invalid_state():
-    _state_store.clear()
+    """Exchange with an unknown state should raise an HTTPException (400)."""
+    _google_state_store.clear()
     try:
-        exchange_code("fake_code", "invalid_state")
+        _exchange_code("fake_code", "invalid_state")
         assert False, "Should have raised"
     except Exception as e:
-        assert "Invalid or expired" in str(e) or "400" in str(e)
+        assert "Invalid" in str(e) or "expired" in str(e).lower() or "400" in str(e)
+    _google_state_store.clear()
 
 
-def test_state_cleanup():
-    # Add an expired state
-    _state_store["expired"] = {"created_at": 0, "scopes": []}
-    _cleanup_states()
-    assert "expired" not in _state_store
+def test_google_state_store_uses_expires_at():
+    """All entries in _google_state_store must have an expires_at field."""
+    _google_state_store.clear()
+    _google_state_store["test"] = {
+        "flow": MagicMock(),
+        "rid": "test",
+        "step": "identify",
+        "created_at": time.time(),
+        "expires_at": time.time() + 600,
+    }
+    assert _google_state_store["test"]["expires_at"] > time.time()
+    _google_state_store.clear()
+
+
+def test_registry_roundtrip():
+    """Registry should save and retrieve user credentials and scopes."""
+    test_email = "test@example.com"
+    test_creds = {
+        "token": "test_token",
+        "refresh_token": "test_refresh",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "test_client",
+        "client_secret": "test_secret",
+        "expiry": "2030-01-01T00:00:00",
+        "scopes": ["openid", "email"],
+    }
+    registry.save(test_email, test_creds, test_creds["scopes"])
+    user = registry.get(test_email)
+    assert user is not None
+    assert user["token"]["token"] == "test_token"
+    assert "openid" in user["scopes"]
+
+    fetched_scopes = registry.get_scopes(test_email)
+    assert "openid" in fetched_scopes
+
+    registry.delete(test_email)
+    assert registry.get(test_email) is None

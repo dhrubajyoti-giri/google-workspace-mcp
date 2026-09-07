@@ -17,7 +17,7 @@ def _ensure_auth():
     client = get_google_client()
     if not client.has_token():
         raise RuntimeError(
-            "Google authentication required. Visit /oauth/start to authorize."
+            "Google authentication required. Complete OAuth via your MCP client."
         )
     return client.get_service("drive", "v3")
 

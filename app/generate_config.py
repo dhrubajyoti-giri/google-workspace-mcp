@@ -1,25 +1,15 @@
-"""Generate MCP driver config on container startup.
+"""Generate MCP driver config (optional utility — not called on startup).
 
-Runs before uvicorn starts. Reads MCP_PORT and AUTH_TOKEN / MCP_USER_MAP
-from the environment, prints the config(s) to stdout, and saves them as
-JSON (+ YAML) to the output directory (default: /output).
+MCP clients (QwenPaw, Claude Desktop, Inspector, etc.) auto-discover
+OAuth endpoints when they first connect to /mcp/ and receive a 401.
+No manual config generation is required.
 
-Single-user mode (AUTH_TOKEN set, no MCP_USER_MAP):
-  → mcp-config.json, mcp-config.yaml (one config)
+This module is kept for clients that need an explicit config file.
+It generates a minimal driver config with NO bearer token — the client
+handles OAuth discovery and token management automatically.
 
-Multi-user mode (MCP_USER_MAP set):
-  → mcp-config-{user_id}.json, mcp-config-{user_id}.yaml (one per user)
-  → Each uses the user's specific bearer token from MCP_USER_MAP
-
-This is the automated replacement for the manual ``gen-mcp-driver-config.sh``
-script — when the container restarts, the config is regenerated automatically
-with the current port and settings.
-
-Usage inside container:
+Usage (optional, not run on container startup):
     python -c "from app.generate_config import generate; generate()"
-
-Or via shell:
-    python -m app.generate_config
 """
 import json
 import logging
@@ -29,50 +19,36 @@ from typing import Any
 
 log = logging.getLogger("google-workspace-mcp.config-gen")
 
-# Default output directory (can be overridden via OUTPUT_DIR env var)
-DEFAULT_OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/output")
+DEFAULT_OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/secrets")
 
 
-def _parse_user_map() -> dict[str, dict[str, Any]]:
-    """Parse MCP_USER_MAP env var into {token: {"user_id": str}}."""
-    raw = os.environ.get("MCP_USER_MAP", "")
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-        result: dict[str, dict[str, Any]] = {}
-        for token, info in parsed.items():
-            if isinstance(info, str):
-                result[token] = {"user_id": info}
-            elif isinstance(info, dict):
-                result[token] = {"user_id": info.get("user_id", "")}
-            else:
-                raise ValueError(f"Invalid MCP_USER_MAP entry: {token}")
-        return result
-    except (json.JSONDecodeError, ValueError) as e:
-        log.warning("Failed to parse MCP_USER_MAP: %s", e)
-        return {}
+def _build_config() -> dict[str, Any]:
+    """Build a minimal MCP driver config WITHOUT a bearer token.
 
+    The MCP client discovers OAuth endpoints at runtime:
+    1. POST /mcp/ → 401 with WWW-Authenticate (resource_metadata URL)
+    2. GET /.well-known/oauth-protected-resource/mcp → auth server URL
+    3. GET /.well-known/oauth-authorization-server → endpoints
+    4. POST /register → dynamic client registration → client_id
+    5. GET /authorize → user authorizes via Google (scope selector)
+    6. POST /token → receives MCP access_token + refresh_token
+    7. POST /mcp/ with Bearer token → tools work
 
-def _build_config(bearer_token: str, user_id: str | None = None) -> dict[str, Any]:
-    """Build an MCP driver config dict with the given bearer token."""
+    No bearer token is embedded in the config — the client handles the
+    entire OAuth flow and token refresh automatically.
+    """
     mcp_port = os.environ.get("MCP_PORT", "8000")
-    display_name = user_id or "google-workspace-mcp"
-
-    config: dict[str, Any] = {
-        "name": display_name,
+    return {
+        "name": "google-workspace-mcp",
         "protocol": "mcp",
         "endpoint": {
             "transport": "streamable_http",
             "url": f"http://127.0.0.1:{mcp_port}/mcp/",
-            "headers": {
-                "Authorization": f"Bearer {bearer_token}",
-            },
         },
         "credentials": {},
         "config": {
-            "display_name": f"Google Workspace MCP" + (f" ({user_id})" if user_id else ""),
-            "description": "Standalone MCP server — Gmail, Drive, Docs, Sheets, Calendar, Slides",
+            "display_name": "Google Workspace MCP",
+            "description": "Gmail, Drive, Docs, Sheets, Calendar, Slides",
             "tools": None,
         },
         "enabled": True,
@@ -81,76 +57,49 @@ def _build_config(bearer_token: str, user_id: str | None = None) -> dict[str, An
             "rules": [],
         },
     }
-    return config
 
 
 def generate(output_dir: str | None = None) -> str:
-    """Generate MCP driver config(s), print to stdout, and save to disk.
+    """Generate MCP driver config, print to stdout, and save to disk.
 
-    In single-user mode: generates one config (mcp-config.{json|yaml}).
-    In multi-user mode: generates one config per user (mcp-config-{user_id}.{json|yaml}).
-
-    Returns a summary string.
+    MCP OAuth mode only — no bearer token embedded. The MCP client
+    discovers OAuth endpoints at runtime and manages tokens automatically.
     """
     output = output_dir or DEFAULT_OUTPUT_DIR
     output_path = Path(output)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    user_map = _parse_user_map()
-    generated: list[tuple[str, str]] = []  # (user_id_or_default, json_str)
+    config = _build_config()
+    json_str = json.dumps(config, indent=2)
 
-    # ── Build configs ──
-    if user_map:
-        # Multi-user: one config per user
-        log.info("Multi-user mode: %d users configured", len(user_map))
-        for token, info in user_map.items():
-            uid = info["user_id"]
-            config = _build_config(bearer_token=token, user_id=uid)
-            generated.append((uid, json.dumps(config, indent=2)))
-    else:
-        # Single-user: one config with AUTH_TOKEN
-        auth_token = os.environ.get("AUTH_TOKEN", "")
-        if not auth_token:
-            log.warning("Neither MCP_USER_MAP nor AUTH_TOKEN set — generating config with empty bearer token")
-        config = _build_config(bearer_token=auth_token)
-        generated.append(("default", json.dumps(config, indent=2)))
+    # Save JSON
+    json_file = output_path / "mcp-config.json"
+    json_file.write_text(json_str, encoding="utf-8")
+    log.info("Saved MCP driver config to %s", json_file)
 
-    # ── Save to disk ──
-    all_saved: list[str] = []
-    for name, json_str in generated:
-        suffix = "" if name == "default" else f"-{name}"
+    # Save YAML (if PyYAML available)
+    saved_files = [str(json_file)]
+    try:
+        import yaml
+        yaml_str = yaml.dump(config, default_flow_style=False, sort_keys=False)
+        yaml_file = output_path / "mcp-config.yaml"
+        yaml_file.write_text(yaml_str, encoding="utf-8")
+        saved_files.append(str(yaml_file))
+        log.info("Saved YAML config to %s", yaml_file)
+    except ImportError:
+        log.warning("PyYAML not available — skipping YAML output")
 
-        # JSON
-        json_file = output_path / f"mcp-config{suffix}.json"
-        json_file.write_text(json_str, encoding="utf-8")
-        all_saved.append(str(json_file))
-        log.info("Saved MCP driver config (JSON) for %s to %s", name or "default", json_file)
-
-        # YAML (if PyYAML available)
-        config_obj = json.loads(json_str)
-        try:
-            import yaml
-            yaml_str = yaml.dump(config_obj, default_flow_style=False, sort_keys=False)
-            yaml_file = output_path / f"mcp-config{suffix}.yaml"
-            yaml_file.write_text(yaml_str, encoding="utf-8")
-            all_saved.append(str(yaml_file))
-            log.info("Saved MCP driver config (YAML) for %s to %s", name or "default", yaml_file)
-        except ImportError:
-            log.warning("PyYAML not available — skipping YAML output")
-
-    # ── Print to stdout ──
+    # Print to stdout
     print("=" * 60)
-    if user_map:
-        print(f"MCP Driver Configs (auto-generated — {len(user_map)} users)")
-    else:
-        print("MCP Driver Config (auto-generated on container start)")
+    print("MCP Driver Config (MCP OAuth mode — no token embedded)")
     print("=" * 60)
-    for name, json_str in generated:
-        print(f"\n--- {name} ---")
-        print(json_str)
+    print(json_str)
     print("\n" + "=" * 60)
+    print("Note: The MCP client auto-discovers OAuth endpoints at runtime.")
+    print("      No bearer token needed — complete Google OAuth in-browser.")
+    print()
 
-    return f"Generated {len(generated)} config(s) to {output_path}"
+    return f"Generated config to {output_path}"
 
 
 def main() -> None:

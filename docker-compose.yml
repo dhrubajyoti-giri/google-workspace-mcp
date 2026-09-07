@@ -3,66 +3,19 @@ services:
     build: .
     container_name: google-workspace-mcp
     restart: unless-stopped
-    ports:
-      - "${MCP_PORT:-8000}:${MCP_PORT:-8000}"   # host:container — both use MCP_PORT for consistency
+    # All runtime config via env_file only (no environment: block)
     env_file:
       - .env
-    environment:
-      # —— All runtime config is env-driven, no hardcoded values ——
-      TZ: "${TZ:-Asia/Kolkata}"
-      PYTHONPATH: /home/appuser/app
-
-      # Server
-      MCP_HOST: "${MCP_HOST:-0.0.0.0}"
-      MCP_PORT: "${MCP_PORT:-8000}"    # dynamic port — set MCP_PORT in .env
-
-      # External URL for OAuth callbacks (must match Caddy domain)
-      EXTERNAL_URL: "${EXTERNAL_URL:-https://google-api.mcp.dg.linkpc.net}"
-
-      # Google OAuth credential paths (point at mounted secrets volume)
-      GOOGLE_CLIENT_SECRET_FILE: "${GOOGLE_CLIENT_SECRET_FILE:-/config/client_secret.json}"
-      GOOGLE_TOKEN_FILE: "${GOOGLE_TOKEN_FILE:-/config/token.json}"
-      GOOGLE_CREDENTIALS_DIR: "${GOOGLE_CREDENTIALS_DIR:-/config}"
-
-      # Google API scopes (comma-separated, read+write)
-      GOOGLE_SCOPES: "${GOOGLE_SCOPES}"
-      GOOGLE_SCOPES_RAW: "${GOOGLE_SCOPES_RAW:-${GOOGLE_SCOPES}}"
-
-      # MCP metadata
-      MCP_SERVER_NAME: "${MCP_SERVER_NAME:-google-workspace-mcp}"
-      MCP_SERVER_VERSION: "${MCP_SERVER_VERSION:-1.0.0}"
-
-      # Logging
-      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-
-      # Auth token — protects ALL endpoints except /healthz, /, /oauth/callback.
-      # Single-user mode: set AUTH_TOKEN (or MCP_BEARER_TOKEN) to your secret.
-      # Multi-user mode: leave AUTH_TOKEN empty and set MCP_USER_MAP instead.
-      AUTH_TOKEN: "${AUTH_TOKEN}"
-
-      # Multi-user token → user mapping (JSON string).
-      # Example:
-      # MCP_USER_MAP='{"token-alice": {"user_id":"alice","scopes":["gmail.modify","drive"]}, "token-bob": {"user_id":"bob","scopes":["documents.readonly"]}}'
-      # When set, enables per-user OAuth + per-user token storage (token-{user_id}.json).
-      # Each token is a bearer credential for a different MCP client / user.
-      MCP_USER_MAP: "${MCP_USER_MAP}"
-
-      # Output: auto-generated MCP driver config (JSON + YAML)
-      OUTPUT_DIR: "${OUTPUT_DIR:-/output}"
     volumes:
-      # ── Secrets: client_secret.json + token.json ──
-      # Host path: point this at your secrets directory.
+      # ── Secrets: Google OAuth credentials + token registry ──
+      # Host path: point SECRETS_VOLUME_PATH in .env at your secrets directory.
       # Contents:
-      #   client_secret.json  ← Google OAuth client credentials (NOT in image)
-      #   token.json          ← auto-generated refresh token (NOT in image, NOT in Git)
-      - ${VOLUME_PATH}:/config:rw
-      # ── Output: generated MCP driver config ──
-      # Config is also printed to stdout on every container start.
-      # Mount this if you want to persist it across restarts.
-      - ${OUTPUT_PATH:-/tmp/gws-output}:/output:rw
+      #   client_secret.json  ← Google OAuth client credentials (from Google Cloud Console)
+      #   registry.json       ← auto-generated (user tokens, per-user scopes)
+      # These are NOT in the Docker image and NOT in git.
+      - ${SECRETS_VOLUME_PATH:-/path/to/secrets}:/secrets:rw
     networks:
-      - caddy   # for Caddy HTTPS proxy
-      - mcp     # for QwenPaw MCP client access
+      - caddy   # HTTPS reverse proxy (Caddy terminates TLS)
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:${MCP_PORT:-8000}/healthz"]
       interval: 30s
@@ -72,6 +25,4 @@ services:
 
 networks:
   caddy:
-    external: true
-  mcp:
     external: true

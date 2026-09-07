@@ -1,23 +1,33 @@
 """Centralized Google Credentials management.
 
-Owns the OAuth refresh-token and auto-refreshes access tokens.
-All service modules call ``get_google_client()`` instead of doing their
-own auth.  In multi-user mode, the client is selected per-request based
-on the ``user_id`` contextvar set by the bearer-token middleware.
+In the MCP OAuth flow, the MCP SDK's ``AuthContextMiddleware`` sets the
+authenticated user (with subject=Google email) in a contextvar.
+``get_google_client()`` reads this contextvar, looks up the correct
+Google credentials in the registry, and returns a ``GoogleClient``.
+
+Token auto-refresh is handled transparently — refreshed tokens are written
+back to the registry.
 """
 from __future__ import annotations
 
-import json
 import logging
+from datetime import datetime
 from typing import Any
 
 from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
+from google.auth.transport.requests import Request as GoogleRequest
 from googleapiclient.discovery import build
 
 from app.config import settings
-from app.context import current_user_id
-from app.token_store import TokenStore
+from app.registry import Registry
+
+# Import the MCP auth context accessor
+try:
+    from mcp.server.auth.middleware.auth_context import get_access_token
+except ImportError:
+    # Fallback: no auth available (should not happen in MCP context)
+    def get_access_token():
+        return None
 
 log = logging.getLogger("google-workspace-mcp")
 
@@ -25,80 +35,38 @@ log = logging.getLogger("google-workspace-mcp")
 class GoogleClient:
     """Per-user credential manager + service factory.
 
-    In multi-user mode, a separate instance is created per user_id.
-    In single-user mode, one instance is used (user_id="default").
+    Constructed from token data stored in the registry (keyed by Google email).
     """
 
-    def __init__(self, user_id: str = "default"):
-        self._user_id = user_id
-        # Per-user token file: token-default.json (single-user) or
-        # token-{user_id}.json (multi-user)
-        if user_id == "default":
-            token_file = settings.google_token_file
-        else:
-            token_file = f"{settings.google_token_file.rsplit('.', 1)[0]}-{user_id}.json"
-        self._token_store = TokenStore(token_file)
+    def __init__(self, email: str, token_data: dict[str, Any], scopes: list[str]):
+        self._email = email
+        self._token_data = token_data
+        self._scopes = scopes
         self._creds: Credentials | None = None
 
     # ── credential lifecycle ──
-
-    @property
-    def token_store(self) -> TokenStore:
-        return self._token_store
-
-    def has_token(self) -> bool:
-        return self._token_store.exists()
 
     def get_credentials(self) -> Credentials:
         """Return valid Google credentials, refreshing if necessary."""
         if self._creds and self._creds.valid:
             return self._creds
 
-        token_data = self._token_store.load()
-        if token_data is None:
-            raise RuntimeError(
-                f"No Google token stored for user '{self._user_id}'. "
-                "Complete OAuth first via /oauth/start"
-            )
-
-        # In multi-user mode, use the user's specific scopes if defined;
-        # otherwise fall back to the global default scopes.
-        scopes = None
-        if settings.is_multi_user:
-            user_scopes = settings.user_scopes(self._user_id)
-            scopes = user_scopes  # may be None → use scopes from token
-
         self._creds = Credentials(
-            token=token_data.get("token"),
-            refresh_token=token_data.get("refresh_token"),
-            token_uri=token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
-            client_id=token_data.get("client_id"),
-            client_secret=token_data.get("client_secret"),
-            scopes=scopes or settings.google_scopes,
+            token=self._token_data.get("token"),
+            refresh_token=self._token_data.get("refresh_token"),
+            token_uri=self._token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=self._token_data.get("client_id"),
+            client_secret=self._token_data.get("client_secret"),
+            scopes=self._scopes,
         )
 
         if self._creds.expired:
-            log.info("Refreshing expired Google access token for user '%s'", self._user_id)
-            self._creds.refresh(Request())
-            self._persist(self._creds)
+            log.info("Refreshing expired Google access token for %s", self._email)
+            self._creds.refresh(GoogleRequest())
+            # Persist updated token back to registry
+            _persist_updated_token(self._email, self._creds)
 
         return self._creds
-
-    def _persist(self, creds: Credentials) -> None:
-        self._token_store.save({
-            "token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-            "client_secret": creds.client_secret,
-            "expiry": creds.expiry.isoformat() if creds.expiry else None,
-            "scopes": list(creds.scopes) if creds.scopes else [],
-        })
-
-    def store_new_credentials(self, creds: Credentials) -> None:
-        """Persist credentials after a fresh OAuth exchange."""
-        self._creds = creds
-        self._persist(creds)
 
     # ── service factory ──
 
@@ -117,22 +85,55 @@ class GoogleClient:
         return build(api, version, credentials=creds)
 
 
-# ── Per-request client factory ────────────────────────────────
-# In multi-user mode, reads user_id from contextvar (set by middleware).
-# In single-user mode, returns the "default" client.
-_client_cache: dict[str, GoogleClient] = {}
+# ── Per-request client factory ──────────────────────────────────────────────
+
+# Module-level registry singleton (same instance as oauth_provider.py)
+_registry = Registry(settings.registry_file)
+
+
+def _persist_updated_token(email: str, creds: Credentials) -> None:
+    """Write refreshed credentials back to the registry."""
+    _registry.save(email, {
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": creds.token_uri,
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "expiry": creds.expiry.isoformat() if creds.expiry else None,
+        "scopes": list(creds.scopes) if creds.scopes else [],
+    }, _registry.get_scopes(email) or settings.default_scopes)
 
 
 def get_google_client() -> GoogleClient:
-    """Return the GoogleClient for the current request's user.
+    """Return the GoogleClient for the current request's authenticated user.
 
-    Reads ``user_id`` from the ContextVar (set by the bearer-token
-    middleware). Falls back to "default" when no context is set
-    (e.g. healthz endpoint, single-user mode).
+    Reads the MCP access token from the auth contextvar (set by
+    ``AuthContextMiddleware``). The token's ``subject`` is the user's
+    Google email, which is used to look up credentials in the registry.
+
+    Raises RuntimeError if not authenticated or user not found in registry.
     """
-    uid = current_user_id()
-    if uid is None:
-        uid = "default"
-    if uid not in _client_cache:
-        _client_cache[uid] = GoogleClient(user_id=uid)
-    return _client_cache[uid]
+    access_token = get_access_token()
+    if access_token is None:
+        raise RuntimeError(
+            "Not authenticated. The MCP client must complete the OAuth flow first."
+        )
+
+    subject = access_token.subject
+    if not subject:
+        raise RuntimeError("Access token has no subject (Google email)")
+
+    token_data = _registry.get_token(subject)
+    if token_data is None:
+        raise RuntimeError(
+            f"No Google credentials found for {subject}. "
+            "Complete OAuth via your MCP client"
+        )
+
+    scopes = _registry.get_scopes(subject) or settings.default_scopes
+    return GoogleClient(email=subject, token_data=token_data, scopes=scopes)
+
+
+def get_registry() -> Registry:
+    """Access the shared Registry singleton."""
+    return _registry

@@ -5,12 +5,14 @@ at runtime.  See ``.env.example`` for the full list.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
-from typing import Optional
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger("google-workspace-mcp")
 
 
 def _parse_scopes(raw: str) -> list[str]:
@@ -31,124 +33,138 @@ class Settings(BaseSettings):
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 8000
 
-    # ── External URL (for OAuth callbacks) ──
-    external_url: str = "https://google-api.mcp.dg.linkpc.net"
+    # ── External URL (for OAuth callbacks + metadata discovery) ──
+    external_url: str = "https://mcp.example.com"
+    google_client_secret_file: str = "/secrets/client_secret.json"
+    google_credentials_dir: str = "/secrets"
+    registry_file: str = "/secrets/registry.json"
 
-    # ── Google OAuth credentials ──
-    google_client_secret_file: str = "/config/client_secret.json"
-    google_token_file: str = "/config/token.json"
-    google_credentials_dir: str = "/config"
+    # ── MCP JWT secret (signs access_tokens + refresh_tokens) ──
+    mcp_jwt_secret: str = Field(
+        default="change-me-in-production",
+        validation_alias=AliasChoices("MCP_JWT_SECRET"),
+    )
 
     # ── Google API scopes ──
-    # Full-access scopes (read + write) so a single OAuth consent covers all tools.
+    _read_scopes: list[str] = [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/documents.readonly",
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/presentations.readonly",
+        "https://www.googleapis.com/auth/contacts.readonly",
+        "https://www.googleapis.com/auth/tasks.readonly",
+    ]
+
+    _write_scopes: list[str] = [
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.metadata",
+        "https://www.googleapis.com/auth/gmail.settings.basic",
+        "https://www.googleapis.com/auth/gmail.labels",
+        "https://www.googleapis.com/auth/gmail.insert",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/presentations",
+        "https://www.googleapis.com/auth/contacts",
+        "https://www.googleapis.com/auth/tasks",
+        "https://www.googleapis.com/auth/chat.bot",
+        "https://www.googleapis.com/auth/chat.messages",
+        "https://www.googleapis.com/auth/chat.spaces",
+    ]
+
+    # Scopes from GOOGLE_SCOPES env var (overrides default_scopes if set)
     google_scopes_raw: str = Field(
-        # ── DEFAULT: read-only scopes (safe, no data modification) ──
-        # Override with GOOGLE_SCOPES=<full-access> in .env for write tools.
-        default=(
-            "https://www.googleapis.com/auth/gmail.readonly,"
-            "https://www.googleapis.com/auth/drive.readonly,"
-            "https://www.googleapis.com/auth/documents.readonly,"
-            "https://www.googleapis.com/auth/spreadsheets.readonly,"
-            "https://www.googleapis.com/auth/calendar.readonly,"
-            "https://www.googleapis.com/auth/presentations.readonly,"
-            "https://www.googleapis.com/auth/contacts.readonly,"
-            "https://www.googleapis.com/auth/tasks.readonly,"
-            "openid,"
-            "https://www.googleapis.com/auth/userinfo.email,"
-            "https://www.googleapis.com/auth/userinfo.profile"
-        ),
+        default="",
         validation_alias=AliasChoices("GOOGLE_SCOPES", "GOOGLE_SCOPES_RAW"),
     )
-    # ── Full-access scopes (uncomment to enable read+write tools) ──
-    # _FULL_ACCESS_SCOPES = (
-    #     "https://www.googleapis.com/auth/gmail.modify,"
-    #     "https://www.googleapis.com/auth/gmail.send,"
-    #     "https://www.googleapis.com/auth/gmail.compose,"
-    #     "https://www.googleapis.com/auth/gmail.metadata,"
-    #     "https://www.googleapis.com/auth/gmail.settings.basic,"
-    #     "https://www.googleapis.com/auth/gmail.labels,"
-    #     "https://www.googleapis.com/auth/gmail.insert,"
-    #     "https://www.googleapis.com/auth/drive,"
-    #     "https://www.googleapis.com/auth/drive.file,"
-    #     "https://www.googleapis.com/auth/drive.readonly,"
-    #     "https://www.googleapis.com/auth/documents,"
-    #     "https://www.googleapis.com/auth/spreadsheets,"
-    #     "https://www.googleapis.com/auth/calendar,"
-    #     "https://www.googleapis.com/auth/presentations,"
-    #     "https://www.googleapis.com/auth/contacts,"
-    #     "https://www.googleapis.com/auth/forms.body,"
-    #     "https://www.googleapis.com/auth/forms.responses,"
-    #     "https://www.googleapis.com/auth/tasks,"
-    #     "https://www.googleapis.com/auth/chat.bot,"
-    #     "https://www.googleapis.com/auth/chat.messages,"
-    #     "https://www.googleapis.com/auth/chat.spaces,"
-    #     "openid,"
-    #     "https://www.googleapis.com/auth/userinfo.email,"
-    #     "https://www.googleapis.com/auth/userinfo.profile"
-    # )
+
+    @property
+    def all_scopes(self) -> list[str]:
+        """All available Google API scopes (read + write + openid) for scope selector."""
+        return (
+            self._read_scopes
+            + self._write_scopes
+            + [
+                "openid",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/userinfo.profile",
+            ]
+        )
+
+    @property
+    def default_scopes(self) -> list[str]:
+        """Scopes used if MCP client doesn't request specific ones."""
+        env_scopes = _parse_scopes(self.google_scopes_raw)
+        if env_scopes:
+            return env_scopes
+        return self._read_scopes + [
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+        ]
 
     @property
     def google_scopes(self) -> list[str]:
-        return _parse_scopes(self.google_scopes_raw)
+        """Effective Google scopes (from env or default)."""
+        return self.default_scopes
+
+    # ── Human-readable scope descriptions for the scope selector UI ──
+    # Maps scope string → (display name, category)
+    _scope_labels: dict[str, str] = {
+        # Gmail
+        "https://www.googleapis.com/auth/gmail.readonly": "Gmail — Read only",
+        "https://www.googleapis.com/auth/gmail.modify": "Gmail — Read + modify",
+        "https://www.googleapis.com/auth/gmail.send": "Gmail — Send",
+        "https://www.googleapis.com/auth/gmail.compose": "Gmail — Compose drafts",
+        "https://www.googleapis.com/auth/gmail.metadata": "Gmail — Metadata (headers only)",
+        "https://www.googleapis.com/auth/gmail.settings.basic": "Gmail — Settings",
+        "https://www.googleapis.com/auth/gmail.labels": "Gmail — Labels",
+        "https://www.googleapis.com/auth/gmail.insert": "Gmail — Insert messages",
+        # Drive
+        "https://www.googleapis.com/auth/drive.readonly": "Drive — Read only",
+        "https://www.googleapis.com/auth/drive": "Drive — Full access",
+        "https://www.googleapis.com/auth/drive.file": "Drive — Per-file access",
+        # Docs
+        "https://www.googleapis.com/auth/documents.readonly": "Docs — Read only",
+        "https://www.googleapis.com/auth/documents": "Docs — Full access",
+        # Sheets
+        "https://www.googleapis.com/auth/spreadsheets.readonly": "Sheets — Read only",
+        "https://www.googleapis.com/auth/spreadsheets": "Sheets — Full access",
+        # Calendar
+        "https://www.googleapis.com/auth/calendar.readonly": "Calendar — Read only",
+        "https://www.googleapis.com/auth/calendar": "Calendar — Full access",
+        # Presentations
+        "https://www.googleapis.com/auth/presentations.readonly": "Slides — Read only",
+        "https://www.googleapis.com/auth/presentations": "Slides — Full access",
+        # Other
+        "https://www.googleapis.com/auth/contacts.readonly": "Contacts — Read only",
+        "https://www.googleapis.com/auth/contacts": "Contacts — Full access",
+        "https://www.googleapis.com/auth/tasks.readonly": "Tasks — Read only",
+        "https://www.googleapis.com/auth/tasks": "Tasks — Full access",
+        "https://www.googleapis.com/auth/chat.bot": "Chat — Bot",
+        "https://www.googleapis.com/auth/chat.messages": "Chat — Messages",
+        "https://www.googleapis.com/auth/chat.spaces": "Chat — Spaces",
+    }
+
+    @property
+    def scope_labels(self) -> dict[str, str]:
+        """Return scope → label mapping for UI display."""
+        return self._scope_labels.copy()
 
     # ── MCP server info ──
     mcp_server_name: str = "google-workspace-mcp"
     mcp_server_version: str = "1.0.0"
 
-    # ── MCP bearer token (security: only the MCP client knows this) ──
-    # Single-user mode (backward compat): a single token string.
-    # Multi-user mode: MCP_USER_MAP overrides this — each token maps to a
-    # user with their own Google credentials and scopes.
-    mcp_bearer_token: str = Field(
-        default="",
-        validation_alias=AliasChoices("AUTH_TOKEN", "MCP_BEARER_TOKEN", "MCP_AUTH_TOKEN"),
-    )
-
-    # ── Multi-user token → user mapping ────────────────────────────────
-    # JSON string: {"bearer_token": {"user_id": "alice", "scopes": [...]}, ...}
-    # When set, enables per-user OAuth + per-user token storage.
-    # Each user's token is stored at /config/token-{user_id}.json.
-    # When unset/empty, falls back to single-user mode (mcp_bearer_token + token.json).
-    mcp_user_map_raw: str = Field(default="", validation_alias=AliasChoices("MCP_USER_MAP"))
-
-    @property
-    def mcp_user_map(self) -> dict[str, dict[str, Any]]:
-        """Parse MCP_USER_MAP into {token: {"user_id": str, "scopes": [str]}}."""
-        if not self.mcp_user_map_raw:
-            return {}
-        try:
-            import json
-            raw = json.loads(self.mcp_user_map_raw)
-            result: dict[str, dict[str, Any]] = {}
-            for token, info in raw.items():
-                if isinstance(info, str):
-                    # Shorthand: {"token": "user_id"} — uses default scopes
-                    result[token] = {"user_id": info, "scopes": None}
-                elif isinstance(info, dict):
-                    result[token] = {
-                        "user_id": info.get("user_id", ""),
-                        "scopes": info.get("scopes") or None,
-                    }
-                else:
-                    raise ValueError(f"Invalid MCP_USER_MAP entry: {token}")
-            return result
-        except (json.JSONDecodeError, ValueError) as e:
-            log.warning("Failed to parse MCP_USER_MAP: %s", e)
-            return {}
-
-    @property
-    def is_multi_user(self) -> bool:
-        """True when MCP_USER_MAP is configured (multi-user mode)."""
-        return bool(self.mcp_user_map)
-
-    def user_scopes(self, user_id: str) -> list[str] | None:
-        """Return scopes for a user_id, or None to use the global default."""
-        for token, info in self.mcp_user_map.items():
-            if info["user_id"] == user_id:
-                if info["scopes"] is not None:
-                    return info["scopes"] if isinstance(info["scopes"], list) else _parse_scopes(info["scopes"])
-                return None  # use global default scopes
-        return None
+    # ── OAuth token lifetimes ──
+    mcp_access_token_ttl: int = 8 * 3600       # 8 hours
+    mcp_refresh_token_ttl: int = 30 * 86400     # 30 days
+    mcp_auth_code_ttl: int = 600                # 10 minutes
 
     # ── Misc ──
     tz: str = Field(default="Asia/Kolkata", validation_alias=AliasChoices("TZ", "TZ_VALUE"))

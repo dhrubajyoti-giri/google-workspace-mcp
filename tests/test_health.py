@@ -22,7 +22,6 @@ def test_healthz_returns_ok(client):
     assert "version" in data
     assert data["status"] in ("ok", "degraded")
     assert data["mcp_enabled"] is True
-    assert "oauth_start" in data
 
 
 def test_root_returns_info(client):
@@ -32,4 +31,3 @@ def test_root_returns_info(client):
     assert "service" in data
     assert data["service"] == "Google Workspace MCP"
     assert "/mcp" in data["mcp_endpoint"]
-    assert "/oauth/start" in data["oauth_start"]

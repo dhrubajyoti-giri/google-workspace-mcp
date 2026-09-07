@@ -1,17 +1,16 @@
-# Caddy reverse proxy for Google Workspace MCP (alternative: full-proxy mode)
-# Add this domain block to your Caddy instance on the `caddy` Docker network.
-# The domain comes from the EXTERNAL_URL in .env (default: google-api.mcp.dg.linkpc.net)
+# ═════════════════════════════════════════════════════════════
+# Caddy reverse proxy — FULL PROXY mode (OPTIONAL alternative)
 #
-# To enable:  echo "import Caddyfile.example-full-proxy" >> /path/to/Caddyfile
-# Or:         caddy fmt --overwrite Caddyfile.example-full-proxy && caddy reload
+# This is the FULL-PROXY alternative: /mcp/* is exposed publicly
+# with bearer-token auth. Enable ONLY if your MCP clients connect
+# through the public URL rather than via localhost.
 #
-# NOTE: This is the full-proxy alternative — it exposes /mcp publicly.
-#       The main Caddyfile (blocks /mcp with 403) is recommended for security.
+# In the default Caddyfile, /mcp/* is blocked from the public
+# internet — MCP clients connect to localhost:8000/mcp/.
+# ═════════════════════════════════════════════════════════════
 
-# ── TLS is handled automatically by Caddy (existing setup) ──
-# Domain comes from the EXTERNAL_URL in .env
-google-api.mcp.dg.linkpc.net {
-    # Proxy all traffic to the bridge container
+YOUR_DOMAIN_HERE {
+    # Proxy all traffic to the MCP container
     reverse_proxy google-workspace-mcp:8000 {
         transport http {
             read_buffer 16mb
@@ -19,7 +18,7 @@ google-api.mcp.dg.linkpc.net {
         }
     }
 
-    # Health check
+    # Health check (no auth)
     @health {
         path /healthz
     }
@@ -29,5 +28,4 @@ google-api.mcp.dg.linkpc.net {
     }
 
     encode zstd gzip
-    file_server
 }

@@ -1,12 +1,27 @@
 """Google Workspace MCP — main FastAPI application.
 
 Exposes:
-  GET  /healthz        — health check (public)
-  GET  /                  — service info (public)
-  GET  /oauth/start       — start OAuth flow (requires bearer token)
-  GET  /oauth/callback    — OAuth callback (public — Google redirects here)
-  GET  /oauth/status      — oauth status (requires bearer token)
-  POST /mcp/*             — MCP streamable HTTP endpoint (requires bearer token)
+  GET  /healthz                              — health check (public)
+  GET  /                                     — service info (public)
+  GET  /.well-known/oauth-authorization-server — OAuth server metadata
+  GET  /.well-known/oauth-protected-resource/mcp — protected resource metadata
+  GET  /authorize                             — MCP OAuth entry (redirect to scope selector)
+  POST /token                                 — exchange MCP auth code / refresh token
+  POST /register                              — dynamic client registration
+  POST /revoke                                — revoke MCP token
+  GET  /oauth/scale                           — scope selection page (public)
+  POST /oauth/scale                           — submit scopes (public)
+  GET  /oauth/callback                        — Google OAuth callback (public)
+  POST /mcp/*                                 — MCP streamable HTTP (requires MCP bearer token)
+
+Auth model:
+  - MCP OAuth endpoints (/authorize, /token, /register, /revoke) and
+    protected-resource metadata are served by the MCP SDK at the root level.
+  - /mcp/* is wrapped with RequireAuthMiddleware — returns 401 with
+    WWW-Authenticate (resource_metadata) if no valid MCP bearer token.
+  - AuthenticationMiddleware validates the bearer token and sets scope["user"].
+  - AuthContextMiddleware sets a contextvar so MCP tools can call
+    get_access_token().subject to identify the Google user.
 """
 from __future__ import annotations
 
@@ -20,23 +35,72 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.context import user_id as user_id_ctx
+from app.mcp_server import mcp, create_mcp_asgi
+from app.oauth import router as oauth_router
+from app.oauth_provider import provider, registry
 
-# ── Public endpoints (no bearer token required) ────────────────
-# /oauth/callback MUST be public — Google redirects here with the auth code.
-# /healthz is public for monitoring (Docker healthcheck).
-# / is public for service discovery.
-PUBLIC_PATHS = frozenset({"/healthz", "/", "/oauth/callback"})
+# ── MCP SDK auth components ────────────────────────────────────
+from mcp.server.auth.middleware.bearer_auth import (
+    BearerAuthBackend,
+    RequireAuthMiddleware,
+)
+from mcp.server.auth.middleware.auth_context import AuthContextMiddleware
+from mcp.server.auth.provider import ProviderTokenVerifier
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
+from mcp.server.auth.routes import (
+    create_auth_routes,
+    create_protected_resource_routes,
+    build_resource_metadata_url,
+)
+from starlette.middleware.authentication import AuthenticationMiddleware
 
-# ── Protocol version helper ────────────────────────────────────
+logging.basicConfig(
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger("google-workspace-mcp")
+
+
+# ── MCP OAuth settings ─────────────────────────────────────────
+# These are used to:
+# 1. Build the AuthSettings for the MCP SDK
+# 2. Mount auth routes at the root level via create_auth_routes()
+# 3. Wrap /mcp with RequireAuthMiddleware
+auth_settings = AuthSettings(
+    issuer_url=str(settings.external_url).rstrip("/"),
+    resource_server_url=f"{str(settings.external_url).rstrip('/')}/mcp",
+    required_scopes=None,  # no MCP-level scope gating — any authenticated user can call tools
+    client_registration_options=ClientRegistrationOptions(
+        enabled=True,  # allow dynamic client registration (QwenPaw, Inspector, etc.)
+        valid_scopes=settings.all_scopes + ["openid", "email", "profile"],
+    ),
+    revocation_options=RevocationOptions(enabled=True),
+)
+
+# Token verifier — used by BearerAuthBackend to validate MCP bearer tokens
+token_verifier = ProviderTokenVerifier(provider)
+
+# Auth routes (mount at root level on FastAPI)
+_auth_routes = create_auth_routes(
+    provider=provider,
+    issuer_url=auth_settings.issuer_url,
+    client_registration_options=auth_settings.client_registration_options,
+    revocation_options=auth_settings.revocation_options,
+)
+
+# Protected resource metadata routes (RFC 9728)
+_protected_routes = create_protected_resource_routes(
+    resource_url=auth_settings.resource_server_url,
+    authorization_servers=[auth_settings.issuer_url],
+    scopes_supported=settings.all_scopes,
+)
+
+# Resource metadata URL for the 401 WWW-Authenticate header
+_resource_metadata_url = build_resource_metadata_url(auth_settings.resource_server_url)
+
+
+# ── ServerDiscoverMiddleware (QwenPaw protocol fix) ────────────
 def _get_supported_protocol_versions(client_version: str | None = None) -> list[str]:
-    """Return supported MCP protocol versions.
-
-    Reads from the (patched) mcp SDK's SUPPORTED_PROTOCOL_VERSIONS list.
-    If ``client_version`` is provided and not already in the list, it is
-    dynamically appended — this makes the fix forward-compatible: any
-    future QwenPaw protocol version is accepted automatically.
-    """
     from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
     versions = list(SUPPORTED_PROTOCOL_VERSIONS)
     if client_version and client_version not in versions:
@@ -45,11 +109,6 @@ def _get_supported_protocol_versions(client_version: str | None = None) -> list[
 
 
 def _add_protocol_version(client_version: str) -> None:
-    """Dynamically add a protocol version to SUPPORTED_PROTOCOL_VERSIONS.
-
-    Called by ServerDiscoverMiddleware on every request so that the
-    MCP SDK's _validate_protocol_version() also accepts the version.
-    """
     if not client_version:
         return
     from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
@@ -58,7 +117,6 @@ def _add_protocol_version(client_version: str) -> None:
 
 
 def _get_client_protocol_version(scope: dict) -> str | None:
-    """Extract mcp-protocol-version from ASGI request headers."""
     for key, value in scope.get("headers", []):
         if key == b"mcp-protocol-version":
             return value.decode()
@@ -68,25 +126,12 @@ def _get_client_protocol_version(scope: dict) -> str | None:
 class ServerDiscoverMiddleware:
     """Intercept QwenPaw's non-standard ``server/discover`` JSON-RPC method.
 
-    QwenPaw's MCP client sends a ``server/discover`` JSON-RPC request before
-    calling ``initialize``, to discover the server's supported protocol versions.
-    The MCP SDK does **not** implement this method — it returns an error for
-    unknown methods, which prevents the modern stateless transport from being
-    used (QwenPaw sees the error and does not fall back to legacy).
+    QwenPaw sends ``server/discover`` before ``initialize``. The MCP SDK
+    does not implement this method. This middleware intercepts it and
+    responds with the supported protocol versions.
 
-    This middleware intercepts ``server/discover`` requests **before** they
-    reach the MCP SDK and returns the supported protocol versions.
-
-    ── Forward compatibility ──
-    Rather than hardcoding a specific version, the middleware dynamically
-    adds the client's advertised protocol version (from the
-    ``mcp-protocol-version`` request header) to the SDK's
-    ``SUPPORTED_PROTOCOL_VERSIONS`` list.  This means any future QwenPaw
-    protocol version — not just ``2026-07-28`` — is accepted automatically,
-    with no code changes needed.
-
-    For all other requests, the body is re-injected and the request is
-    passed through to the MCP ASGI app unchanged.
+    Dynamically appends the client's protocol version to
+    SUPPORTED_PROTOCOL_VERSIONS so any future version is accepted.
     """
 
     def __init__(self, app: Any):
@@ -97,14 +142,12 @@ class ServerDiscoverMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # ── Dynamic version patching (forward-compatible) ──
-        # Add the client's protocol version to SUPPORTED_PROTOCOL_VERSIONS
-        # so the MCP SDK's _validate_protocol_version() accepts it.
+        # Dynamic version patching (forward-compatible)
         client_version = _get_client_protocol_version(scope)
         if client_version:
             _add_protocol_version(client_version)
 
-        # ── Read the full request body ──
+        # Read the full request body
         body = b""
         more = True
         while more:
@@ -113,10 +156,9 @@ class ServerDiscoverMiddleware:
                 body += message.get("body", b"")
                 more = message.get("more_body", False)
             elif message["type"] == "http.disconnect":
-                # Client disconnected before sending body — pass through
                 break
 
-        # ── Check if this is a server/discover request ──
+        # Check if this is a server/discover request
         try:
             data = json.loads(body)
             if isinstance(data, dict) and data.get("method") == "server/discover":
@@ -146,49 +188,38 @@ class ServerDiscoverMiddleware:
         except (json.JSONDecodeError, UnicodeDecodeError, KeyError):
             pass
 
-        # ── Re-inject body for the MCP ASGI app ──
+        # Re-inject body for the MCP ASGI app
         async def _receive():
-            return {
-                "type": "http.request",
-                "body": body,
-                "more_body": False,
-            }
+            return {"type": "http.request", "body": body, "more_body": False}
 
         await self.app(scope, _receive, send)
 
-logging.basicConfig(
-    level=getattr(logging, settings.log_level.upper(), logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger("google-workspace-mcp")
 
-# ── MCP server ────────────────────────────────────────────────
-# Imported at module level so the session manager exists before the
-# lifespan context enters run().  The ASGI app is created once below,
-# after the FastAPI app and bearer-guard middleware are defined, so
-# the mount wraps the real transport app.
-from app.mcp_server import mcp, create_mcp_asgi
-
-
+# ── Lifespan ───────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup / shutdown hooks — including MCP session manager lifecycle."""
     log.info("Google Workspace MCP starting up (v%s)", settings.mcp_server_version)
     log.info("External URL: %s", settings.external_url)
     log.info("OAuth callback: %s/oauth/callback", settings.external_url)
     log.info("MCP endpoint: %s/mcp", settings.external_url)
+    log.info("OAuth flow: %s/authorize (MCP OAuth) — client discovers endpoints automatically", settings.external_url)
 
     if not os.path.exists(settings.google_client_secret_file):
-        log.warning("Google client_secret.json not found at %s — OAuth will not work until placed there", settings.google_client_secret_file)
+        log.warning(
+            "Google client_secret.json not found at %s — OAuth will not work until placed there",
+            settings.google_client_secret_file,
+        )
 
-    # ── Start MCP streamable HTTP session manager ──
-    # The session manager's run() creates the async task group required
-    # by the streamable HTTP protocol.  When mounted in FastAPI, the
-    # Starlette app's own lifespan is not triggered, so we must enter
-    # run() ourselves.
+    registry_users = registry.list_users()
+    if registry_users:
+        log.info("Registry: %d authorized user(s): %s", len(registry_users), [u["email"] for u in registry_users])
+    else:
+        log.info("Registry: no authorized users — authorize via your MCP client")
+
     async with mcp.session_manager.run():
         log.info("MCP session manager started")
         yield
+
     log.info("MCP session manager stopped")
     log.info("Google Workspace MCP shutting down")
 
@@ -199,90 +230,59 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── OAuth routes ─────────────────────────────────────────────
-from app.oauth import router as oauth_router
+# ── Auth middleware (runs for ALL HTTP requests) ─────────────
+# Order matters: AuthenticationMiddleware (outer, validates token) must run
+# BEFORE AuthContextMiddleware (inner, reads scope["user"] → sets contextvar).
+# Starlette add_middleware() stacks in reverse — the last added is outermost,
+# so AuthContextMiddleware is added first (inner), then AuthenticationMiddleware (outer).
+app.add_middleware(AuthContextMiddleware)
+app.add_middleware(
+    AuthenticationMiddleware,
+    backend=BearerAuthBackend(token_verifier),
+    on_error=lambda conn, exc: JSONResponse({"detail": str(exc)}, status_code=401),
+)
 
+# ── Auth routes at root level (public endpoints) ─────────────
+# These are served by the MCP SDK — mounted directly on the FastAPI app.
+for route in _auth_routes:
+    app.routes.append(route)
+
+# Protected resource metadata (RFC 9728)
+for route in _protected_routes:
+    app.routes.append(route)
+
+# ── OAuth web UI router (public endpoints) ───────────────────
 app.include_router(oauth_router)
 
-# ── MCP mount ────────────────────────────────────────────────
-# Bearer-token auth is handled by _bearer_guard middleware above, which
-# protects ALL endpoints except PUBLIC_PATHS. The MCP mount only needs the
-# ServerDiscoverMiddleware wrapper.
+# ── MCP mount (protected — requires MCP bearer token) ────────
+# RequireAuthMiddleware checks scope["user"] (set by AuthenticationMiddleware).
+# If not authenticated → 401 with WWW-Authenticate (resource_metadata URL).
 mcp_asgi = create_mcp_asgi()
-
-# Wrap with ServerDiscoverMiddleware to handle QwenPaw's non-standard
-# server/discover JSON-RPC method (the MCP SDK doesn't implement it).
-mcp_asgi = ServerDiscoverMiddleware(mcp_asgi)
-
-
-@app.middleware("http")
-async def _bearer_guard(request: Request, call_next):
-    """Protect all endpoints except PUBLIC_PATHS with bearer token."""
-    path = request.url.path
-    if path in PUBLIC_PATHS:
-        return await call_next(request)
-
-    # ── All other endpoints require bearer token ──
-    auth = request.headers.get("Authorization", "")
-    if not auth or not auth.startswith("Bearer "):
-        return JSONResponse(
-            {"detail": "Bearer token required"},
-            status_code=401,
-        )
-
-    token = auth[len("Bearer "):]
-
-    if settings.is_multi_user:
-        # Multi-user: look up user from MCP_USER_MAP
-        user_info = settings.mcp_user_map.get(token)
-        if not user_info:
-            return JSONResponse(
-                {"detail": "Invalid bearer token"},
-                status_code=403,
-            )
-        uid = user_info["user_id"]
-    else:
-        # Single-user: check against AUTH_TOKEN
-        if not settings.mcp_bearer_token or token != settings.mcp_bearer_token:
-            return JSONResponse(
-                {"detail": "Invalid bearer token"},
-                status_code=403,
-            )
-        uid = "default"
-
-    # Set user context — propagates to MCP tools via contextvar
-    ctx_token = user_id_ctx.set(uid)
-    try:
-        return await call_next(request)
-    finally:
-        user_id_ctx.reset(ctx_token)
+mcp_asgi = ServerDiscoverMiddleware(mcp_asgi)  # handle QwenPaw's server/discover
+protected_mcp = RequireAuthMiddleware(
+    mcp_asgi,
+    required_scopes=[],  # no MCP-level scope requirements — see Point 3: token required only
+    resource_metadata_url=_resource_metadata_url,
+)
+app.mount("/mcp", protected_mcp)
 
 
-app.mount("/mcp", mcp_asgi)
-
-
-# ── Health ───────────────────────────────────────────────────
+# ── Health + root (public) ───────────────────────────────────
 
 @app.get("/healthz")
 def healthz():
     """Health check — reports service, MCP, and OAuth status.
 
-    Public endpoint (no bearer token required). In multi-user mode,
-    reports aggregate status across all configured users.
+    Public endpoint (no bearer token required).
     """
-    from app.google_client import get_google_client
-    client = get_google_client()
-    has_token = client.has_token()
-
-    user_count = len(settings.mcp_user_map) if settings.is_multi_user else 1
+    users = registry.list_users()
     return JSONResponse({
-        "status": "ok" if has_token else "degraded",
+        "status": "ok" if users else "degraded",
         "version": settings.mcp_server_version,
         "mcp_enabled": True,
-        "oauth_configured": has_token,
-        "multi_user": settings.is_multi_user,
-        "configured_users": user_count,
-        "oauth_start": f"{os.environ.get('EXTERNAL_URL', settings.external_url)}/oauth/start",
+        "oauth_configured": bool(users),
+        "registered_users": [u["email"] for u in users],
+        "mcp_auth": f"{settings.external_url}/oauth/scale",
     })
 
 
@@ -291,6 +291,6 @@ def root():
     return JSONResponse({
         "service": "Google Workspace MCP",
         "mcp_endpoint": "/mcp",
-        "oauth_start": "/oauth/start",
+        "oauth_metadata": "/.well-known/oauth-authorization-server",
         "healthz": "/healthz",
     })

@@ -1,276 +1,521 @@
-"""Google OAuth 2.0 flow — start, callback, state validation, PKCE.
+"""OAuth flow: two-step Google OAuth + scope selection + MCP auth code.
 
-The Google Workspace MCP owns all OAuth logic. the MCP client never sees
-authorization codes, tokens, or client secrets.
+This module implements the web UI layer on top of the OAuthAuthorizationServerProvider.
+
+Flow (from MCP client via /authorize):
+  1. MCP client -> /authorize -> provider.authorize() -> redirect to /oauth/scale?rid=XXX
+  2. /oauth/scale -> (no email yet) -> redirect to Google (scope=openid email)  [identify]
+  3. Google -> /oauth/callback?code=...&state=XXX|identify
+  4. Callback -> exchange code -> extract email -> store in session -> redirect to /oauth/scale
+  5. /oauth/scale -> render scope selection form (pre-populated from registry if user exists)
+  6. User POST /oauth/scale -> redirect to Google (scope=selected)  [authorize]
+  7. Google -> /oauth/callback?code=...&state=XXX|authorize
+  8. Callback -> exchange code -> store in registry -> generate MCP auth code
+  9. Redirect to MCP client's redirect_uri with ?code=<mcp_code>&state=<original_state>
+
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
-import secrets
 import time
-from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
-from google.auth.exceptions import RefreshError
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import HTTPException
 
 from app.config import settings
-from app.context import current_user_id, user_id as user_id_ctx
+from app.oauth_provider import provider, registry
 
 log = logging.getLogger("google-workspace-mcp")
 
-# ── In-memory state store (transient) ──────────────────────────
-# Maps state → {redirect_uri, scopes, user_id, created_at, flow}
-_state_store: dict[str, dict[str, Any]] = {}
-_STATE_TTL = 300  # 5 minutes
+router = APIRouter(prefix="/oauth", tags=["oauth"])
 
 
-def _state_dir() -> Path:
-    """Directory for state files (if using file-based state instead)."""
-    return Path(settings.google_credentials_dir) / ".oauth_states"
+# ── Google OAuth state stores ─────────────────────────────────────────────
+
+# Google OAuth state -> {flow, rid, step, created_at, expires_at}
+_google_state_store: dict[str, dict[str, Any]] = {}
+
+# rid (request_id from provider's auth request store) -> {email, selected_scopes, expires_at}
+# Set after step 1 (identify) completes; used in steps 2, 5, 8
+_callback_session: dict[str, dict[str, Any]] = {}
 
 
-def _cleanup_states() -> None:
-    """Remove expired state entries."""
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+def _cleanup_stores() -> None:
+    """Remove expired entries from in-memory stores."""
     now = time.time()
-    expired = [k for k, v in _state_store.items()
-               if now - v.get("created_at", 0) > _STATE_TTL]
-    for k in expired:
-        del _state_store[k]
+    for store in [_google_state_store, _callback_session]:
+        expired = [k for k, v in store.items() if v.get("expires_at", 0) < now]
+        for k in expired:
+            del store[k]
 
 
-def get_redirect_uri() -> str:
-    """The OAuth callback URI that Google will redirect to."""
-    return f"{settings.external_url.rstrip('/')}/oauth/callback"
+def _get_redirect_uri() -> str:
+    """Google OAuth redirect URI (where Google sends the user back)."""
+    return f"{settings.external_url}/oauth/callback"
 
 
-def get_flow(scopes: list[str] | None = None) -> Flow:
-    """Create a Google OAuth Flow with PKCE."""
-    flow = Flow.from_client_secrets_file(
-        settings.google_client_secret_file,
-        scopes=scopes or settings.google_scopes,
-        redirect_uri=get_redirect_uri(),
+def _get_flow(scopes: list[str]) -> Any:
+    """Create a Google OAuth Flow with the given scopes."""
+    import json
+    from pathlib import Path
+    from google_auth_oauthlib.flow import Flow
+
+    client_config_path = settings.google_client_secret_file
+    path = Path(client_config_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Google client_secret.json not found at {client_config_path}. "
+            f"Mount your Google OAuth credentials there (see docker-compose.yml)."
+        )
+    client_config = json.loads(path.read_text())
+
+    flow = Flow.from_client_config(
+        client_config,
+        scopes=scopes,
+        redirect_uri=_get_redirect_uri(),
     )
-    # Enable PKCE automatically (flow.run_flow uses it internally)
     return flow
 
 
-def get_authorization_url(scopes: list[str] | None = None, user_id: str | None = None) -> tuple[str, str]:
-    """Return (auth_url, state) for the given scopes.
+def _google_auth_url(scopes: list[str], state: str, access_type: str = "offline") -> str:
+    """Build a Google OAuth authorization URL and store the flow for later exchange.
 
-    In multi-user mode, ``user_id`` is stored in the state so the callback
-    can route the token to the correct per-user file.
-    In single-user mode, user_id is None → treated as "default".
+    Args:
+        scopes: Google API scopes to request
+        state: Google OAuth state parameter (carries our internal {rid}|{step})
+        access_type: "offline" (get refresh token) or "online" (no refresh token)
+
+    Returns:
+        Google authorization URL (browser should redirect user here)
     """
-    _cleanup_states()
-    effective_user = user_id or "default"
-    flow = get_flow(scopes)
-    auth_url, state = flow.authorization_url(
-        access_type="offline",       # need refresh_token for auto-refresh
-        prompt="consent",            # force consent screen → guarantees refresh_token
-                                     # (without this, Google uses prompt=none on re-auth
-                                     #  and skips the refresh_token for returning users)
+    _cleanup_stores()
+    flow = _get_flow(scopes)
+    auth_url, _ = flow.authorization_url(
+        access_type=access_type,
+        prompt="consent",                  # always show consent screen (ensures refresh token)
+        include_granted_scopes="true",     # include previously granted scopes (incremental addition)
+        state=state,
+        # Note: include_granted_scopes may cause oauthlib to emit a
+        # "Scope has changed" Warning. _exchange_code() catches it.
     )
-    _state_store[state] = {
+    # Store the flow keyed by the Google OAuth state string
+    _google_state_store[state] = {
+        "flow": flow,
+        "rid": state.split("|")[0] if "|" in state else state,
+        "step": state.split("|")[1] if "|" in state else "unknown",
         "created_at": time.time(),
-        "redirect_uri": get_redirect_uri(),
-        "scopes": scopes or settings.google_scopes,
-        "user_id": effective_user,
-        "flow": flow,  # Keep the Flow (incl. PKCE code_verifier) for token exchange
+        "expires_at": time.time() + 600,  # 10 min TTL
     }
-    log.info("OAuth flow started — state %s..., user=%s, scopes=%d", state[:8], effective_user, len(scopes or settings.google_scopes))
-    return auth_url, state
+    return auth_url
 
 
-def exchange_code(code: str, state: str) -> dict[str, Any]:
-    """Exchange authorization code for credentials, validate state.
+def _exchange_code(code: str, state: str) -> tuple[dict[str, Any], Any]:
+    """Exchange Google authorization code for token.
 
-    Returns token dict that can be stored by TokenStore.
-    Raises HTTPException on invalid state or token errors.
+    Returns (token_response_dict, flow_object).
+    The flow object is needed for email extraction and credential building.
+    Uses flow.fetch_token() (not oauth2session.fetch_token()) to ensure
+    flow.credentials is populated.
+
+    Handles the "scope mismatch" warning (oauthlib raises a Warning when
+    include_granted_scopes causes previously-granted scopes to mismatch)
+    by recovering the token from flow.oauth2session.token.
     """
-    _cleanup_states()
+    stored = _google_state_store.pop(state, None)
+    if not stored:
+        raise HTTPException(400, "Invalid or expired OAuth state")
 
-    # ── Validate state ──
-    stored = _state_store.pop(state, None)
-    if stored is None:
-        # Also check if it was created >5 min ago or just doesn't match
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid or expired OAuth state. Please restart the flow.",
-        )
-
-    # ── Reuse the original Flow (it holds the PKCE code_verifier from
-    #    get_authorization_url). Creating a new Flow would lose the
-    #    verifier and Google rejects the token exchange with
-    #    "invalid_grant: Missing code verifier." ──
     flow = stored["flow"]
-    creds = None
+    flow.redirect_uri = _get_redirect_uri()
+
     try:
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-    except Warning as w:
-        # oauthlib raises a Warning when Google returns scopes that differ
-        # from what the Flow requested (e.g. if the OAuth client was
-        # previously used by another app with different scopes).
-        # The token IS still fetched — oauthlib parses it before the
-        # Warning, but doesn't return it from fetch_token().
-        log.warning("Scope mismatch during token exchange (token still valid): %s", w)
-        # Extract the token from the OAuth2 session that oauthlib populated
-        token = flow.oauth2session.token
-        if not token:
-            raise HTTPException(status_code=500, detail="Token exchange failed — no token received from Google")
-        # Build Credentials from the raw token + the Flow's client config
-        config = flow.client_config
-        client_info = config.get("web") or config.get("installed") or config
-        scopes_str = token.get("scope", "")
-        creds = Credentials(
-            token=token.get("access_token"),
-            refresh_token=token.get("refresh_token"),
-            token_uri=client_info.get("token_uri", "https://oauth2.googleapis.com/token"),
-            client_id=client_info.get("client_id"),
-            client_secret=client_info.get("client_secret"),
-            scopes=scopes_str.split() if isinstance(scopes_str, str) else scopes_str,
-        )
+        token_response = flow.fetch_token(code=code)
+    except (Exception, Warning) as e:
+        # oauthlib may raise a Warning (not Error) when scopes change due to
+        # include_granted_scopes. The token is usually already in the session.
+        # Recover it and rebuild the token response.
+        log.warning("flow.fetch_token raised %s: %s — attempting token recovery", type(e).__name__, e)
+        sess = flow.oauth2session
+        if not hasattr(sess, "token") or sess.token is None:
+            raise  # real error, re-raise
+        token_response = sess.token
 
-    if creds is None or creds.refresh_token is None:
-        raise HTTPException(
-            status_code=400,
-            detail="OAuth exchange succeeded but no refresh token was returned. "
-                   "Ensure 'access_type=offline' is set and the user hasn't "
-                   "pre-authorized the app before.",
-        )
+    return token_response, flow
 
-    token_data = {
-        "token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
-        "expiry": creds.expiry.isoformat() if creds.expiry else None,
-        "scopes": list(creds.scopes) if creds.scopes else [],
+
+def _extract_email(token_response: dict[str, Any], flow: Any) -> str | None:
+    """Extract the user's Google email from the OAuth token response.
+
+    Method 1: decode the id_token JWT (fast, no network).
+    Method 2: call the Google userinfo API (fallback).
+    """
+    # Method 1: decode id_token (JWT)
+    id_token_value = token_response.get("id_token") or getattr(flow.credentials, "id_token", None)
+    if id_token_value:
+        import jwt
+        try:
+            claims = jwt.decode(id_token_value, options={"verify_signature": False})
+            email = claims.get("email")
+            if email:
+                return email
+        except Exception as e:
+            log.warning("Failed to decode id_token: %s", e)
+
+    # Method 2: call userinfo API
+    try:
+        from googleapiclient.discovery import build
+        service = build("oauth2", "v2", credentials=flow.credentials)
+        user_info = service.userinfo().get().execute()
+        return user_info.get("email")
+    except Exception:
+        pass
+
+    return None
+
+
+def _build_token_data(token_response: dict[str, Any], flow: Any) -> dict[str, Any]:
+    """Build a Google Credentials-compatible dict for registry storage."""
+    creds = flow.credentials
+    # Use scopes from the token response (reflects what Google actually granted,
+    # including previously granted scopes via include_granted_scopes=true)
+    scope_str = token_response.get("scope", "")
+    if scope_str:
+        scopes = scope_str.split()
+    elif creds and creds.scopes:
+        scopes = list(creds.scopes)
+    else:
+        scopes = []
+    return {
+        "token": creds.token if creds else token_response.get("access_token"),
+        "refresh_token": creds.refresh_token if creds else token_response.get("refresh_token"),
+        "token_uri": creds.token_uri if creds else "https://oauth2.googleapis.com/token",
+        "client_id": creds.client_id if creds else None,
+        "client_secret": creds.client_secret if creds else None,
+        "expiry": creds.expiry.isoformat() if creds and creds.expiry else None,
+        "scopes": scopes,
     }
-    log.info("OAuth token stored — scopes: %s", ", ".join(token_data["scopes"][:3]))
-    return token_data, stored.get("user_id", "default")
 
 
-# ── FastAPI router ─────────────────────────────────────────────
+# ── Routes ─────────────────────────────────────────────────────────────────
 
-router = APIRouter(prefix="/oauth")
+@router.get("/scale", response_class=HTMLResponse)
+def scope_selector(request: Request):
+    """Entry point from /authorize (via provider).
 
-
-@router.get("/start")
-def start_oauth():
-    """Start the Google OAuth 2.0 flow.
-
-    Requires bearer token (to identify the user). In multi-user mode,
-    uses the requesting user's configured scopes. The user_id is embedded
-    in the OAuth state so /callback can store the token to the correct
-    per-user file.
+    Step A: If user not yet identified -> redirect to Google (minimal scopes).
+    Step B: If user identified -> render scope selection form.
     """
-    uid = current_user_id()
-    if uid is None:
-        uid = "default"
+    rid = request.query_params.get("rid")
+    if not rid:
+        return _error_page("Missing request ID")
 
-    # In multi-user mode, use the user's specific scopes if defined;
-    # otherwise fall back to the global default scopes.
-    user_scopes = None
-    if settings.is_multi_user:
-        user_scopes = settings.user_scopes(uid)
+    _cleanup_stores()
 
-    auth_url, state = get_authorization_url(scopes=user_scopes, user_id=uid)
-    return RedirectResponse(url=auth_url)
+    # Check if user was already identified (from step 1)
+    session = _callback_session.get(rid)
+    if not session or not session.get("email"):
+        # Step A: redirect to Google to identify the user (step 1)
+        state = f"{rid}|identify"
+        auth_url = _google_auth_url(
+            scopes=["openid", "https://www.googleapis.com/auth/userinfo.email"],
+            state=state,
+            access_type="online",  # no refresh token needed in identify step
+        )
+        return RedirectResponse(url=auth_url, status_code=302)
+
+    # Step B: render scope selection form
+    email = session["email"]
+    existing_scopes = registry.get_scopes(email) or []
+    auth_req = provider._auth_requests.get(rid)
+    client_scopes = auth_req["scopes"] if auth_req else []
+
+    return _render_scope_form(rid, email, existing_scopes, client_scopes, request)
 
 
-@router.get("/callback")
-def callback(code: str, state: str):
-    """Handle Google's OAuth callback.
+@router.post("/scale", response_class=HTMLResponse)
+async def scope_submit(request: Request):
+    """Handle scope selection submission -> redirect to Google with selected scopes."""
+    rid = request.query_params.get("rid")
+    if not rid:
+        return _error_page("Missing request ID")
 
-    Public endpoint — Google redirects here with ?code=...&state=...
-    The user_id is recovered from the stored state (set during /oauth/start)
-    and used to route the token to the correct per-user file.
+    _cleanup_stores()
+    session = _callback_session.get(rid)
+    if not session:
+        return _error_page("Session expired. Please try again.")
+
+    # Parse selected scopes from the form
+    form = await request.form()
+    selected = []
+    for scope in settings.all_scopes:
+        # Checkboxes are named "scope_<encoded_scope>"
+        field_name = "scope_" + scope.replace("://", "_").replace("/", "_")
+        if form.get(field_name):
+            selected.append(scope)
+
+    if not selected:
+        return _error_page("Please select at least one scope.")
+
+    session["selected_scopes"] = selected
+
+    # Redirect to Google with selected scopes (step: authorize)
+    state = f"{rid}|authorize"
+    auth_url = _google_auth_url(scopes=selected, state=state)
+    return RedirectResponse(url=auth_url, status_code=302)
+
+
+@router.get("/callback", response_class=HTMLResponse)
+def callback(request: Request):
+    """Google OAuth callback (public — Google redirects here).
+
+    Handles both steps:
+    - state={rid}|identify: exchange code, extract email, redirect to /oauth/scale
+    - state={rid}|authorize: exchange code, store in registry, complete MCP auth
     """
+    code = request.query_params.get("code")
+    state = request.query_params.get("state", "")
+    error = request.query_params.get("error")
+
+    if error:
+        return _error_page(f"Google OAuth error: {error}")
+
+    if not code or not state:
+        return _error_page("Missing code or state parameter")
+
+    # Parse Google state: {rid}|{step}
+    parts = state.split("|", 1)
+    if len(parts) != 2:
+        return _error_page("Invalid Google OAuth state format")
+    rid, step = parts
+
+    _cleanup_stores()
+
+    # Exchange code for Google token
     try:
-        token_data, uid = exchange_code(code, state)
+        token_response, flow = _exchange_code(code, state)
     except HTTPException:
         raise
-    except RefreshError as e:
-        raise HTTPException(status_code=400, detail=f"OAuth refresh error: {e}")
     except Exception as e:
-        log.error("OAuth callback error: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="OAuth exchange failed")
+        log.error("Token exchange failed: %s", e, exc_info=True)
+        return _error_page(f"Token exchange failed: {e}")
 
-    # Set the user context so get_google_client() returns the right client
-    from app.google_client import get_google_client
-    ctx = user_id_ctx.set(uid)
-    try:
-        client = get_google_client()
-        creds = Credentials(
-            token=token_data["token"],
-            refresh_token=token_data["refresh_token"],
-            token_uri=token_data["token_uri"],
-            client_id=token_data["client_id"],
-            client_secret=token_data["client_secret"],
-            scopes=token_data["scopes"],
+    # Verify rid still exists (auth request from MCP client or manual flow)
+    auth_req = provider._auth_requests.get(rid)
+    if auth_req is None:
+        return _error_page("Request expired. Please restart authorization via your MCP client.")
+
+    if step == "identify":
+        # Step 1: identify the user → store email → redirect to scope form
+        email = _extract_email(token_response, flow)
+        if not email:
+            return _error_page("Could not determine your Google email. Please try again.")
+
+        _callback_session[rid] = {
+            "email": email,
+            "selected_scopes": None,
+            "expires_at": time.time() + 600,
+        }
+        log.info("User identified: %s", email)
+
+        # Redirect to scope selection page
+        return RedirectResponse(
+            url=f"{settings.external_url}/oauth/scale?rid={rid}",
+            status_code=302,
         )
-        client.store_new_credentials(creds)
-    finally:
-        user_id_ctx.reset(ctx)
 
-    return JSONResponse({
-        "status": "success",
-        "message": "Google OAuth completed. Token stored securely.",
-        "user_id": uid,
-        "scopes": token_data["scopes"],
-    })
+    elif step == "authorize":
+        # Step 2: user authorized with selected scopes -> store in registry
+        session = _callback_session.get(rid, {})
+        email = session.get("email")
+        if not email:
+            # Fallback: extract email from this token response too
+            email = _extract_email(token_response, flow)
+
+        if not email:
+            return _error_page("Could not determine user email.")
+
+        # Use scopes actually granted by Google (includes previously granted
+        # via include_granted_scopes=true, plus the newly selected ones)
+        scope_str = token_response.get("scope", "")
+        granted_scopes = scope_str.split() if scope_str else session.get("selected_scopes", settings.default_scopes)
+        if not granted_scopes:
+            granted_scopes = settings.default_scopes
+
+        # Store in registry (keyed by Google email)
+        creds_data = _build_token_data(token_response, flow)
+        registry.save(email, creds_data, granted_scopes)
+
+        # Clean up in-memory stores
+        provider._auth_requests._requests.pop(rid, None)
+        del _callback_session[rid]
+
+        if auth_req.get("redirect_uri"):
+            # MCP OAuth flow -> generate auth code -> redirect to MCP client
+            mcp_code = provider._generate_mcp_auth_code(
+                client_id=auth_req["client_id"],
+                code_challenge=auth_req.get("code_challenge", ""),
+                redirect_uri=auth_req.get("redirect_uri", ""),
+                scopes=granted_scopes,
+                subject=email,
+            )
+
+            redirect_uri = auth_req.get("redirect_uri", "")
+            mcp_state = auth_req.get("mcp_state", "")
+            params = f"code={mcp_code}&state={mcp_state}"
+            return RedirectResponse(url=f"{redirect_uri}?{params}", status_code=302)
+        else:
+            # Manual flow -> show success page
+            log.info("Manual OAuth complete for %s, scopes=%d", email, len(granted_scopes))
+            # Generate a short-lived MCP access token for testing
+            access_token = provider._issue_access_token(email, granted_scopes)
+            return _success_page_with_token(email, granted_scopes, access_token)
+
+    else:
+        return _error_page(f"Unknown OAuth step: {step}")
 
 
-@router.get("/status")
-def oauth_status():
-    """Report OAuth status without exposing tokens."""
-    uid = current_user_id() or "default"
-    from app.google_client import get_google_client
-    ctx = user_id_ctx.set(uid)
-    try:
-        client = get_google_client()
-        has_token = client.has_token()
-    finally:
-        user_id_ctx.reset(ctx)
-    return {"authenticated": has_token, "credentials_dir": settings.google_credentials_dir, "user_id": uid}
+# ── HTML rendering ──────────────────────────────────────────────────────────
+
+def _error_page(message: str) -> HTMLResponse:
+    return HTMLResponse(
+        f"""<!DOCTYPE html>
+<html><head><title>OAuth Error</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{font-family:sans-serif;max-width:600px;margin:40px auto;padding:0 20px;text-align:center}}
+.error{{background:#ffebee;color:#c62828;padding:20px;border-radius:8px}}</style>
+</head><body><div class="error"><h2>OAuth Error</h2><p>{message}</p>
+<p>If using an MCP client, disconnect and reconnect it.</p></div></body></html>""",
+        status_code=400,
+    )
 
 
-@router.post("/revoke")
-def revoke_token():
-    """Clear the stored Google OAuth token for the current user.
+def _render_scope_form(rid: str, email: str, existing: list[str], client_scopes: list[str], request: Request) -> HTMLResponse:
+    """Render the scope selection HTML form.
 
-    Requires bearer token. Deletes the per-user token file. The user
-    will need to re-authorize at /oauth/start afterward.
+    Shows all Google API scopes grouped by service, with the user's
+    existing grants pre-selected (so re-auth adds rather than replaces).
     """
-    uid = current_user_id()
-    if uid is None:
-        uid = "default"
-    from app.google_client import get_google_client
-    ctx = user_id_ctx.set(uid)
-    try:
-        client = get_google_client()
-        token_store = client.token_store
-        token_exists = token_store.exists()
-        if token_exists:
-            token_store.delete()
-            log.info("Token revoked for user %s", uid)
-            return JSONResponse({
-                "status": "success",
-                "user_id": uid,
-                "message": f"Token for user {uid} revoked. Re-authorize at /oauth/start.",
-            })
-        return JSONResponse({
-            "status": "success",
-            "user_id": uid,
-            "message": f"No token found for user {uid} — nothing to revoke.",
-        })
-    finally:
-        user_id_ctx.reset(ctx)
+    labels = settings.scope_labels
+    all_scopes = settings.all_scopes
+
+    # Categorize scopes by service (for better grouping)
+    categories = {
+        "Gmail": [s for s in all_scopes if "gmail" in s],
+        "Google Drive": [s for s in all_scopes if "drive" in s],
+        "Docs": [s for s in all_scopes if "documents" in s],
+        "Sheets": [s for s in all_scopes if "spreadsheets" in s],
+        "Calendar": [s for s in all_scopes if "calendar" in s],
+        "Presentations": [s for s in all_scopes if "presentations" in s],
+        "Other": [s for s in all_scopes if s.startswith("openid") or "userinfo" in s],
+    }
+    # Remaining scopes go in "Other"
+    categorized = set()
+    for scopes in categories.values():
+        for s in scopes:
+            categorized.add(s)
+    categories["Other"].extend([s for s in all_scopes if s not in categorized and "drive" not in s and "gmail" not in s and "documents" not in s and "spreadsheets" not in s and "calendar" not in s and "presentations" not in s])
+
+    def _checkbox(scope: str, checked: bool = False) -> str:
+        field_name = "scope_" + scope.replace("://", "_").replace("/", "_")
+        label = labels.get(scope, scope)
+        # Truncate long scope names
+        display = label if len(label) < 50 else label[:47] + "..."
+        checked_attr = "checked" if checked else ""
+        return (
+            f'<label style="display:block;padding:4px 0;font-size:13px;">'
+            f'<input type="checkbox" name="{field_name}" value="1" {checked_attr}>'
+            f' {display}</label>'
+        )
+
+    def _group(title: str, scopes: list[str]) -> str:
+        if not scopes:
+            return ""
+        items = "".join(_checkbox(s, checked=s in existing) for s in scopes)
+        return (
+            f'<fieldset style="margin:12px 0;padding:12px;border:1px solid #e0e0e0;border-radius:6px;">'
+            f'<legend style="font-weight:600;font-size:13px;color:#555;padding:0 6px;">{title}</legend>'
+            f'{items}</fieldset>'
+        )
+
+    email_label = email if email else "New user"
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html><head><title>Select Scopes</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:700px;margin:30px auto;padding:0 20px;background:#f9f9f9}}
+  .container{{background:white;padding:25px;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
+  h1{{font-size:22px;color:#1a1a1a}}
+  .user{{font-size:14px;color:#666;margin:10px 0 20px;font-weight:500}}
+  fieldset{{margin:12px 0;border:1px solid #e0e0e0;border-radius:6px;padding:12px}}
+  legend{{font-weight:600;font-size:13px;color:#555;padding:0 6px}}
+  button{{background:#0066cc;color:white;border:none;padding:12px 24px;border-radius:6px;
+          font-size:14px;cursor:pointer;width:100%;font-weight:600;margin-top:10px}}
+  button:hover{{background:#0052a3}}
+  p.note{{font-size:12px;color:#999;margin-top:15px}}
+</style></head><body>
+<div class="container">
+  <h1>Google Workspace MCP — Scope Selection</h1>
+  <p class="user">Account: {email_label}</p>
+  <form method="POST" action="/oauth/scale?rid={rid}">
+    <p style="font-size:13px;color:#666;">Select which Google Workspace access you grant to this MCP server:</p>
+    {_group("Gmail", categories["Gmail"])}
+    {_group("Google Drive", categories["Google Drive"])}
+    {_group("Docs", categories["Docs"])}
+    {_group("Sheets", categories["Sheets"])}
+    {_group("Calendar", categories["Calendar"])}
+    {_group("Presentations", categories["Presentations"])}
+    {_group("Other", categories["Other"])}
+    <button type="submit">Authorize with Google</button>
+    <p class="note">Existing grants are pre-selected. New grants are added to your existing scopes.</p>
+  </form>
+</div>
+</body></html>""")
+
+
+
+
+
+def _success_page_with_token(email: str, scopes: list[str], access_token: str) -> HTMLResponse:
+    """Success page for manual OAuth flow — shows MCP bearer token."""
+    import urllib.parse
+    scopes_display = ", ".join(scopes[:5]) + (" ..." if len(scopes) > 5 else "")
+    token_display = access_token[:60] + "..." if len(access_token) > 60 else access_token
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html><head><title>OAuth Success</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{{font-family:-apple-system,sans-serif;max-width:600px;margin:40px auto;padding:0 20px;text-align:center}}
+  .success{{background:#e8f5e9;padding:25px;border-radius:10px;border:1px solid #c8e6c9}}
+  h1{{color:#2e7d32;font-size:22px}}
+  code{{background:#f5f5f5;padding:8px 12px;border-radius:4px;font-size:11px;word-break:break-all;display:block;margin:10px 0;text-align:left}}
+  .scopes{{background:#f5f5f5;padding:10px;border-radius:4px;font-size:12px;text-align:left;max-height:150px;overflow:auto}}
+  button{{background:#0066cc;color:white;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px;margin-top:8px}}
+  button:hover{{background:#0052a3}}
+</style></head><body>
+<div class="success">
+  <h1>✓ OAuth Successful</h1>
+  <p><strong>Account:</strong> {email}</p>
+  <p><strong>Scopes granted:</strong> {len(scopes)}</p>
+  <div class="scopes">{scopes_display}</div>
+  <p style="margin-top:15px;font-size:12px;text-align:left;">
+    <strong>MCP Bearer Token</strong> (for standalone MCP client usage):
+  </p>
+  <code id="token">{token_display}</code>
+  <button onclick="navigator.clipboard.writeText('{access_token}');this.textContent='✓ Copied!'">
+    Copy to clipboard
+  </button>
+  <p style="font-size:10px;color:#999;margin-top:12px;">
+    Note: MCP clients with OAuth auto-discovery (QwenPaw, Claude Desktop)
+    do not need this token — they discover endpoints automatically.
+  </p>
+</div>
+<p style="margin-top:10px;font-size:12px;color:#999;">
+  <p>Authorized accounts are managed via your MCP client.</p>
+</p>
+</body></html>""")
