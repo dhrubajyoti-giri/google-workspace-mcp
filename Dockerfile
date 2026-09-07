@@ -36,7 +36,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 # Dynamic port via MCP_PORT env var (defaults to 8000).
 # MCP OAuth is handled entirely by the MCP client (QwenPaw, Claude Desktop,
-# Inspector, etc.) — no config generation needed on startup. The client
+# Claude Code, etc.) — no config generation needed on startup. The client
 # discovers OAuth endpoints at /.well-known/oauth-authorization-server
 # when it first connects to /mcp/ and gets a 401.
 CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${MCP_PORT:-8000}"]

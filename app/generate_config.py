@@ -1,6 +1,6 @@
 """Generate MCP driver config (optional utility — not called on startup).
 
-MCP clients (QwenPaw, Claude Desktop, Inspector, etc.) auto-discover
+MCP clients (QwenPaw, Claude Desktop, Claude Code, etc.) auto-discover
 OAuth endpoints when they first connect to /mcp/ and receive a 401.
 No manual config generation is required.
 

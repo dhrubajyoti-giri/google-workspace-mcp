@@ -71,7 +71,7 @@ auth_settings = AuthSettings(
     resource_server_url=f"{str(settings.external_url).rstrip('/')}/mcp",
     required_scopes=None,  # no MCP-level scope gating — any authenticated user can call tools
     client_registration_options=ClientRegistrationOptions(
-        enabled=True,  # allow dynamic client registration (QwenPaw, Inspector, etc.)
+        enabled=True,  # allow dynamic client registration (QwenPaw, Claude Desktop, etc.)
         valid_scopes=settings.all_scopes + ["openid", "email", "profile"],
     ),
     revocation_options=RevocationOptions(enabled=True),

@@ -22,7 +22,7 @@ import time
 from typing import Any
 
 import jwt
-from pydantic import AnyHttpUrl, BaseModel
+
 
 from mcp.server.auth.provider import (
     AccessToken,
@@ -229,9 +229,11 @@ class GoogleOAuthProvider:
         # The client's requested scopes are used as defaults in the scope selector
         client_scopes = params.scopes or []
 
-        # Redirect to our scope selection page
-        # The scope selector will start the two-step Google OAuth flow
-        return f"{settings.external_url}/oauth/scale?rid={req_id}&scopes={' '.join(client_scopes)}"
+        # Redirect to our scope selection page.
+        # client_scopes are already stored in the auth request; scope_selector
+        # reads them from there — no need to pass them in the URL (avoid
+        # unencoded spaces in query strings).
+        return f"{settings.external_url}/oauth/scale?rid={req_id}"
 
     # ── Authorization code ──
 
@@ -247,29 +249,6 @@ class GoogleOAuthProvider:
         if code.expires_at < time.time():
             del self._auth_codes[authorization_code]
             return None
-        return code
-
-    def _generate_auth_code(
-        self,
-        client_id: str,
-        code_challenge: str,
-        redirect_uri: AnyHttpUrl,
-        scopes: list[str],
-        subject: str,
-    ) -> str:
-        """Generate a random MCP auth code and store it."""
-        code = secrets.token_urlsize(32)
-        self._auth_codes[code] = AuthorizationCode(
-            code=code,
-            scopes=scopes,
-            expires_at=time.time() + settings.mcp_auth_code_ttl,
-            client_id=client_id,
-            code_challenge=code_challenge,
-            redirect_uri=redirect_uri,
-            redirect_uri_provided_explicitly=True,
-            resource=None,
-            subject=subject,
-        )
         return code
 
     async def exchange_authorization_code(

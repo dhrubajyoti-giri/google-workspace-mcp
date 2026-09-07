@@ -42,7 +42,7 @@ cp .env.example .env
 
 # Edit .env:
 #   EXTERNAL_URL=https://mcp.yourdomain.com      # your public HTTPS domain
-#   MCP_JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+#   MCP_JWT_SECRET=$(openssl rand -hex 32)
 #   SECRETS_VOLUME_PATH=/absolute/path/to/secrets  # host dir for OAuth files
 ```
 
@@ -153,6 +153,7 @@ Plus always included: `openid`, `userinfo.email`, `userinfo.profile`
 | `MCP_ACCESS_TOKEN_TTL` | `28800` | MCP access token lifetime in seconds (8h) — client auto-refreshes |
 | `MCP_REFRESH_TOKEN_TTL` | `2592000` | MCP refresh token lifetime in seconds (30d) |
 | `MCP_AUTH_CODE_TTL` | `600` | MCP authorization code lifetime in seconds (10 min) |
+| `SCOPE_SELECTOR_MODE` | `all` | `all` (default — show every available Google scope) · `requested` (only MCP-client-requested scopes) |
 | `SCOPE_SELECTOR_MODE` | `all` | `all` (default — show every available scope in selector) · `requested` (show only MCP-client-requested scopes) |
 | `SECRETS_VOLUME_PATH` | `/path/to/secrets` | Host directory for `client_secret.json` + `registry.json` |
 | `TZ` | `Asia/Kolkata` | Timezone |
@@ -194,6 +195,20 @@ mcp.yourdomain.com {
     reverse_proxy google-workspace-mcp:8000
 }
 ```
+
+> **Why block `/mcp/*` with 403?** The MCP bearer-token (JWT) *is* enforced
+> application-side, but the 403 is defense-in-depth — a network-level block
+> so the MCP interface is never reachable from the public internet.
+> If you'd rather expose `/mcp/*` publicly and rely solely on JWT auth,
+> switch to `Caddyfile.example-full-proxy` instead.
+
+## Token Persistence
+
+Once a Google account is authorized (entry in `registry.json`), the user
+does **not** need to re-authorize until that entry is removed or Google
+revokes the refresh token. Google access tokens expire silently; the bridge
+auto-refreshes them using the stored refresh token — no user interaction
+required. Remove an account by deleting its entry from `registry.json`.
 
 ## Troubleshooting
 

@@ -84,6 +84,10 @@ class GoogleClient:
         creds = self.get_credentials()
         return build(api, version, credentials=creds)
 
+    def has_token(self) -> bool:
+        """Check whether the user has stored Google credentials."""
+        return bool(self._token_data.get("token"))
+
 
 # ── Per-request client factory ──────────────────────────────────────────────
 
