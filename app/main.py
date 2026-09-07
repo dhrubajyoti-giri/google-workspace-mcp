@@ -21,17 +21,40 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 
 # ── Protocol version helper ────────────────────────────────────
-def _get_supported_protocol_versions() -> list[str]:
-    """Return supported MCP protocol versions, including QwenPaw's 2026-07-28.
+def _get_supported_protocol_versions(client_version: str | None = None) -> list[str]:
+    """Return supported MCP protocol versions.
 
     Reads from the (patched) mcp SDK's SUPPORTED_PROTOCOL_VERSIONS list.
-    The patch in mcp_server.py adds 2026-07-28 so this returns the full set.
+    If ``client_version`` is provided and not already in the list, it is
+    dynamically appended — this makes the fix forward-compatible: any
+    future QwenPaw protocol version is accepted automatically.
     """
     from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
     versions = list(SUPPORTED_PROTOCOL_VERSIONS)
-    if "2026-07-28" not in versions:
-        versions.append("2026-07-28")
+    if client_version and client_version not in versions:
+        versions.append(client_version)
     return versions
+
+
+def _add_protocol_version(client_version: str) -> None:
+    """Dynamically add a protocol version to SUPPORTED_PROTOCOL_VERSIONS.
+
+    Called by ServerDiscoverMiddleware on every request so that the
+    MCP SDK's _validate_protocol_version() also accepts the version.
+    """
+    if not client_version:
+        return
+    from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+    if client_version not in SUPPORTED_PROTOCOL_VERSIONS:
+        SUPPORTED_PROTOCOL_VERSIONS.append(client_version)
+
+
+def _get_client_protocol_version(scope: dict) -> str | None:
+    """Extract mcp-protocol-version from ASGI request headers."""
+    for key, value in scope.get("headers", []):
+        if key == b"mcp-protocol-version":
+            return value.decode()
+    return None
 
 
 class ServerDiscoverMiddleware:
@@ -39,15 +62,20 @@ class ServerDiscoverMiddleware:
 
     QwenPaw's MCP client sends a ``server/discover`` JSON-RPC request before
     calling ``initialize``, to discover the server's supported protocol versions.
-    The MCP SDK (v1.29.1) does **not** implement this method — it returns an
-    error for unknown methods, which prevents the modern stateless transport
-    from being used (QwenPaw sees the error and does not fall back to legacy).
+    The MCP SDK does **not** implement this method — it returns an error for
+    unknown methods, which prevents the modern stateless transport from being
+    used (QwenPaw sees the error and does not fall back to legacy).
 
     This middleware intercepts ``server/discover`` requests **before** they
-    reach the MCP SDK and returns the supported protocol versions — including
-    ``2026-07-28`` (which the protocol version patch in ``mcp_server.py``
-    adds to ``SUPPORTED_PROTOCOL_VERSIONS`` so the subsequent ``initialize``
-    call's header validation also succeeds).
+    reach the MCP SDK and returns the supported protocol versions.
+
+    ── Forward compatibility ──
+    Rather than hardcoding a specific version, the middleware dynamically
+    adds the client's advertised protocol version (from the
+    ``mcp-protocol-version`` request header) to the SDK's
+    ``SUPPORTED_PROTOCOL_VERSIONS`` list.  This means any future QwenPaw
+    protocol version — not just ``2026-07-28`` — is accepted automatically,
+    with no code changes needed.
 
     For all other requests, the body is re-injected and the request is
     passed through to the MCP ASGI app unchanged.
@@ -60,6 +88,13 @@ class ServerDiscoverMiddleware:
         if scope["type"] != "http" or scope.get("method", "") != "POST":
             await self.app(scope, receive, send)
             return
+
+        # ── Dynamic version patching (forward-compatible) ──
+        # Add the client's protocol version to SUPPORTED_PROTOCOL_VERSIONS
+        # so the MCP SDK's _validate_protocol_version() accepts it.
+        client_version = _get_client_protocol_version(scope)
+        if client_version:
+            _add_protocol_version(client_version)
 
         # ── Read the full request body ──
         body = b""
@@ -77,19 +112,23 @@ class ServerDiscoverMiddleware:
         try:
             data = json.loads(body)
             if isinstance(data, dict) and data.get("method") == "server/discover":
-                supported = _get_supported_protocol_versions()
+                supported = _get_supported_protocol_versions(client_version)
                 response_body = json.dumps({
                     "jsonrpc": "2.0",
                     "id": data.get("id"),
                     "result": {"supportedVersions": supported},
                 })
+                response_headers = [
+                    (b"content-type", b"application/json"),
+                ]
+                if client_version:
+                    response_headers.append(
+                        (b"mcp-protocol-version", client_version.encode())
+                    )
                 await send({
                     "type": "http.response.start",
                     "status": 200,
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"mcp-protocol-version", b"2026-07-28"),
-                    ],
+                    "headers": response_headers,
                 })
                 await send({
                     "type": "http.response.body",
