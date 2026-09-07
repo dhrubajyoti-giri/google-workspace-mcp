@@ -1,1 +1,1 @@
-# Google API Bridge — standalone MCP server for QwenPaw
+# Google Workspace MCP — standalone MCP server for MCP clients

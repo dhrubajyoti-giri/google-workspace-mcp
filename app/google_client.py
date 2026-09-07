@@ -16,7 +16,7 @@ from googleapiclient.discovery import build
 from app.config import settings
 from app.token_store import TokenStore
 
-log = logging.getLogger("google-api-bridge")
+log = logging.getLogger("google-workspace-mcp")
 
 
 class GoogleClient:

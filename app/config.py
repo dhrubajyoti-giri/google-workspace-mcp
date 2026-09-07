@@ -1,4 +1,4 @@
-"""Configuration for the Google API Bridge.
+"""Configuration for the Google Workspace MCP.
 
 All values are configurable via environment variables — nothing is hardcoded
 at runtime.  See ``.env.example`` for the full list.
@@ -92,10 +92,10 @@ class Settings(BaseSettings):
         return _parse_scopes(self.google_scopes_raw)
 
     # ── MCP server info ──
-    mcp_server_name: str = "google-api-bridge"
+    mcp_server_name: str = "google-workspace-mcp"
     mcp_server_version: str = "1.0.0"
 
-    # ── MCP bearer token (security: only QwenPaw knows this) ──
+    # ── MCP bearer token (security: only the MCP client knows this) ──
     mcp_bearer_token: str = Field(
         default="",
         validation_alias=AliasChoices("AUTH_TOKEN", "MCP_BEARER_TOKEN", "MCP_AUTH_TOKEN"),

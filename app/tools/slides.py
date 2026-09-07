@@ -6,7 +6,7 @@ from typing import Any
 
 from app.google_client import get_google_client
 
-log = logging.getLogger("google-api-bridge.tools.slides")
+log = logging.getLogger("google-workspace-mcp.tools.slides")
 
 
 def _ensure_auth():

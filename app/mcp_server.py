@@ -21,7 +21,7 @@ from app.tools.sheets import sheets_get as _sheets_get, sheets_update as _sheets
 from app.tools.calendar import calendar_list_events as _cal_list, calendar_get_event as _cal_get, calendar_create_event as _cal_create, calendar_update_event as _cal_update, calendar_delete_event as _cal_delete
 from app.tools.slides import slides_get as _slides_get, slides_create as _slides_create, slides_update as _slides_update
 
-log = logging.getLogger("google-api-bridge")
+log = logging.getLogger("google-workspace-mcp")
 
 # ── Protocol version compatibility patch (fallback) ─────────────────
 # QwenPaw's MCP client advertises a protocol version newer than what the
@@ -49,7 +49,7 @@ _domain = urlparse(settings.external_url).hostname or "localhost"
 
 mcp = FastMCP(
     name=settings.mcp_server_name,
-    instructions=f"Google API Bridge v{settings.mcp_server_version} — Gmail, Drive, Docs, Sheets, Calendar, Slides",
+    instructions=f"Google Workspace MCP v{settings.mcp_server_version} — Gmail, Drive, Docs, Sheets, Calendar, Slides",
     streamable_http_path="/",
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,

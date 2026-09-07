@@ -30,6 +30,6 @@ def test_root_returns_info(client):
     assert resp.status_code == 200
     data = resp.json()
     assert "service" in data
-    assert data["service"] == "Google API Bridge"
+    assert data["service"] == "Google Workspace MCP"
     assert "/mcp" in data["mcp_endpoint"]
     assert "/oauth/start" in data["oauth_start"]

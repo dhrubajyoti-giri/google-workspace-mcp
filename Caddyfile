@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────
-# Caddy reverse proxy for the Google API Bridge
+# Caddy reverse proxy for the Google Workspace MCP
 #
 # Public-facing: only exposes OAuth flows and health checks.
 # /mcp/* is BLOCKED from the public internet — QwenPaw connects
@@ -10,17 +10,17 @@ google-api.mcp.dg.linkpc.net {
     # ── Public endpoints (allowed from anywhere) ──
     # OAuth: /oauth/start redirects to Google, /oauth/callback receives callback
     route /oauth/* {
-        reverse_proxy google-api:8000
+        reverse_proxy google-workspace-mcp:8000
     }
 
     # Health check: Docker/Caddy health probes
     route /healthz {
-        reverse_proxy google-api:8000
+        reverse_proxy google-workspace-mcp:8000
     }
 
     # Root: redirect to healthz
     route / {
-        reverse_proxy google-api:8000
+        reverse_proxy google-workspace-mcp:8000
     }
 
     # ── BLOCKED: /mcp/* (not exposed publicly) ──

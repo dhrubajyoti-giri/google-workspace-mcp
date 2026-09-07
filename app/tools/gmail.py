@@ -8,7 +8,7 @@ from typing import Any
 
 from app.google_client import get_google_client
 
-log = logging.getLogger("google-api-bridge.tools.gmail")
+log = logging.getLogger("google-workspace-mcp.tools.gmail")
 
 MAX_RESULTS_LIMIT = 100
 

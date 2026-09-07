@@ -1,4 +1,4 @@
-name: google-api-bridge
+name: google-workspace-mcp
 protocol: mcp
 endpoint:
   transport: streamable_http
@@ -10,8 +10,8 @@ endpoint:
     Authorization: "Bearer ${AUTH_TOKEN}"
 credentials: {}
 config:
-  display_name: Google API Bridge
-  description: Standalone Google API bridge with independent OAuth — Gmail, Drive, Docs, Sheets, Calendar, Slides, Forms, Tasks, Chat
+  display_name: Google Workspace MCP
+  description: Standalone Google Workspace MCP bridge with independent OAuth — Gmail, Drive, Docs, Sheets, Calendar, Slides, Forms, Tasks, Chat
   tools: null
 enabled: true
 policy:

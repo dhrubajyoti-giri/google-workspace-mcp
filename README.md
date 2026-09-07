@@ -1,14 +1,14 @@
-# Google API Bridge
+# Google Workspace MCP
 
 A standalone MCP server that handles its **own Google OAuth 2.0** and exposes
-purpose-built Google Workspace tools to QwenPaw. Completely independent of
-gws-mcp — QwenPaw connects here via `streamable_http`.
+purpose-built Google Workspace tools to any MCP client. Completely independent of
+via streamable_http — MCP clients connect here via `streamable_http`.
 
 ## Architecture
 
 ```
  ┌──────────┐        ┌─────────────────┐      ┌─────────────────────┐
- │  User   │◄─HTTPS─│    Caddy        │ ◄─── │  google-api        │
+ │  User   │◄─HTTPS─│    Caddy        │ ◄─── │  google-workspace-mcp    │
  │ (browser)│  :443  │ (TLS proxy)     │  :8000│  (FastAPI + MCP)   │
  └──────────┘        └──────┬──────────┘      └──────┬──────────────┘
                             │                        │
@@ -29,8 +29,8 @@ gws-mcp — QwenPaw connects here via `streamable_http`.
 ```
 
 **Key difference from gws-mcp:** This bridge owns its OAuth flow and stores
-credentials in `/config` — QwenPaw never sees tokens, client secrets, or
-authorization codes. The OAuth callback goes through QwenPaw's domain
+credentials in `/config` — the MCP client never sees tokens, client secrets, or
+authorization codes. The OAuth callback goes through the MCP client's domain
 (`https://<hostname>/api/mcp/oauth/callback`) which Caddy routes to the
 bridge.
 
@@ -66,7 +66,7 @@ docker compose up -d --build
 
 # 5. Caddy: add this domain to your Caddy config
 #    caddy fmt --overwrite Caddyfile && caddy reload
-#    NOTE: Caddyfile reverse_proxies to google-api:8000 —
+#    NOTE: Caddyfile reverse_proxies to google-workspace-mcp:8000 —
 #    if you changed MCP_PORT in .env, update the port in Caddyfile too
 ```
 
@@ -83,7 +83,7 @@ docker compose up -d --build
 ## OAuth Flow
 
 ```
-1. User (or QwenPaw) → GET /oauth/start
+1. User (or MCP client) → GET /oauth/start
 2. Bridge → redirects to Google consent screen
 3. Google → redirects to /oauth/callback?code=...&state=...
 4. Bridge → exchanges code for token (incl. refresh_token)
@@ -96,8 +96,8 @@ docker compose up -d --build
 ## MCP Transport
 
 - **Type:** Streamable HTTP (MCP protocol v1)
-- **Endpoint:** `https://<your-domain>/mcp` (QwenPaw MCP client connects here; redirect from `/mcp` → `/mcp/` handled automatically)
-- **QwenPaw config:** `drivers/mcp/google-api-bridge.yaml` → install into QwenPaw runtime's `drivers/mcp/`
+- **Endpoint:** `https://<your-domain>/mcp` (MCP clients connect here; redirect from `/mcp` → `/mcp/` handled automatically)
+- **MCP client config:** `drivers/mcp/google-workspace-mcp.yaml` → install into QwenPaw runtime's `drivers/mcp/`
 
 ## Tools
 
@@ -134,10 +134,10 @@ docker compose up -d --build
 | `slides_create(title)` | Create a new presentation |
 | `slides_update(presentation_id, requests_json)` | Batch update slides
 
-## Connecting to QwenPaw
+## Connecting MCP Clients
 
-The bridge is a standalone MCP server — QwenPaw connects to it via a
-driver YAML. Since QwenPaw does **not** interpolate `${ENV_VAR}` in the
+The bridge is a standalone MCP server — a standard MCP client connects via a
+driver YAML. Since MCP clients may **not** interpolate `${ENV_VAR}` in the
 `endpoint.url` field (only in headers), the URL must be written
 literally into the driver config.
 
@@ -150,15 +150,15 @@ Use the config generation script to produce the driver YAML from `.env`:
 ./scripts/gen-mcp-driver-config.sh
 # → reads MCP_PORT + AUTH_TOKEN from .env
 # → prints the config to console
-# → saves to drivers/mcp/google-api-bridge-generated.yaml
+# → saves to drivers/mcp/google-workspace-mcp-generated.yaml
 #   (NOT auto-installed — you do it manually)
 ```
 
-Then manually copy the generated config to QwenPaw and restart:
+Then manually copy the generated config to your MCP client and restart:
 
 ```bash
-cp drivers/mcp/google-api-bridge-generated.yaml \
-   /app/working/workspaces/default/drivers/mcp/google-api-bridge.yaml
+cp drivers/mcp/google-workspace-mcp-generated.yaml \
+   /app/working/workspaces/default/drivers/mcp/google-workspace-mcp.yaml
 qwenpaw daemon restart
 ```
 
@@ -167,24 +167,24 @@ qwenpaw daemon restart
 1. Set `AUTH_TOKEN` in the bridge `.env` (e.g. `AUTH_TOKEN=your-secret-here`)
 2. Set the **same** `AUTH_TOKEN` as an environment variable in QwenPaw's
    runtime (same value as in the bridge `.env`)
-3. Copy `drivers/mcp/google-api-bridge.yaml` to QwenPaw's
+3. Copy `drivers/mcp/google-workspace-mcp.yaml` to your MCP client's
    `data/drivers/mcp/`
 4. Replace `__MCP_PORT__` in the YAML with the port from your `.env`
    (default `8000`) — e.g. `http://127.0.0.1:8000/mcp/`
-5. Restart QwenPaw
+5. Restart your MCP client
 
-### QwenPaw auth model
+### MCP Client Auth Model
 
 The bridge protects `/mcp/*` with a **bearer-token** middleware.
-QwenPaw must send `Authorization: Bearer <token>` on every MCP request.
+the MCP client must send `Authorization: Bearer <token>` on every MCP request.
 The token must be **the same value** set as `AUTH_TOKEN` in both the
 bridge's `.env` (docker-compose) and QwenPaw's environment.
 
-| Layer | What QwenPaw sees |
+| Layer | What the MCP client sees |
 |---|---|
 | Endpoint | `http://127.0.0.1:<MCP_PORT>/mcp/` (localhost only) |
 | Auth header | `Authorization: Bearer ${AUTH_TOKEN}` (QwenPaw env interpolation) |
-| Google OAuth | Fully opaque — the bridge exchanges codes/tokens internally; QwenPaw never sees Google credentials |
+| Google OAuth | Fully opaque — the bridge exchanges codes/tokens internally; the MCP client never sees Google credentials |
 
 ## Testing
 
@@ -212,7 +212,7 @@ curl -H "Host: $(grep EXTERNAL_URL .env | cut -d= -f2-)" \
 |---|---|
 | `OAuth credentials lack required scopes` | Re-authorize: delete `/config/token.json`, visit `/oauth/start` |
 | `client_secret.json not found` | Place it in `secrets/client_secret.json` before starting |
-| MCP tools not appearing in QwenPaw | Check `drivers/mcp/google-api-bridge.yaml` endpoint URL |
+| Check the driver config endpoint URL and bearer token | Check `drivers/mcp/google-workspace-mcp.yaml` endpoint URL |
 | Caddy 502 Bad Gateway | Verify container is running: `docker compose ps` |
 
 ## Phases
@@ -220,7 +220,7 @@ curl -H "Host: $(grep EXTERNAL_URL .env | cut -d= -f2-)" \
 - [x] **Phase 1** — Infrastructure (Docker, FastAPI, healthz, config)
 - [x] **Phase 2** — Auth (OAuth 2.0 flow, token store, auto-refresh)
 - [x] **Phase 3** — Read tools (Gmail, Drive, Docs, Sheets, Calendar, Slides)
-- [x] **Phase 4** — QwenPaw MCP driver config + Caddy routing
+- [x] **Phase 4** — MCP driver config + Caddy routing
 - [x] **Phase 5** — Write tools (create, update, delete)
-- [ ] **Phase 6** — Additional APIs (Tasks, Contacts, Chat)
-- [ ] **Phase 7** — E2E testing (OAuth flow, all tools, QwenPaw integration)
+- [~] **Phase 6** — Additional APIs (Tasks, Contacts, Chat) — scopes configured in `.env`; tool implementations pending
+- [~] **Phase 7** — E2E testing — 30 unit tests pass; full OAuth + Docker + client integration pending host deployment

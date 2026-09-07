@@ -31,7 +31,7 @@ dist/
 *_TODO.md
 
 # Generated driver configs
-drivers/mcp/google-api-bridge-generated.yaml
+drivers/mcp/google-workspace-mcp-generated.yaml
 
 # IDE
 .vscode/

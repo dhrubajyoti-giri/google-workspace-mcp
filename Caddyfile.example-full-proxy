@@ -1,18 +1,21 @@
-# Caddy reverse proxy for Google API Bridge
+# Caddy reverse proxy for Google Workspace MCP (alternative: full-proxy mode)
 # Add this domain block to your Caddy instance on the `caddy` Docker network.
 # The domain comes from the EXTERNAL_URL in .env (default: google-api.mcp.dg.linkpc.net)
 #
-# To enable:  echo "import Caddyfile.google-api-bridge" >> /path/to/Caddyfile
-# Or:         caddy fmt --overwrite Caddyfile.google-api-bridge && caddy reload
+# To enable:  echo "import Caddyfile.example-full-proxy" >> /path/to/Caddyfile
+# Or:         caddy fmt --overwrite Caddyfile.example-full-proxy && caddy reload
+#
+# NOTE: This is the full-proxy alternative — it exposes /mcp publicly.
+#       The main Caddyfile (blocks /mcp with 403) is recommended for security.
 
 # ── TLS is handled automatically by Caddy (existing setup) ──
 # Domain comes from the EXTERNAL_URL in .env
 google-api.mcp.dg.linkpc.net {
     # Proxy all traffic to the bridge container
-    reverse_proxy google-api:8000 {
+    reverse_proxy google-workspace-mcp:8000 {
         transport http {
             read_buffer 16mb
-            response_header_up X-Served-By "caddy-google-api-bridge"
+            response_header_up X-Served-By "caddy-google-workspace-mcp"
         }
     }
 
@@ -21,7 +24,7 @@ google-api.mcp.dg.linkpc.net {
         path /healthz
     }
     handle_path @health {
-        reverse_proxy google-api:8000
+        reverse_proxy google-workspace-mcp:8000
         header Cache-Control "no-cache"
     }
 

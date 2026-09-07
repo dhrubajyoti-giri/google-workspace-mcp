@@ -1,7 +1,7 @@
 services:
-  google-api:
+  google-workspace-mcp:
     build: .
-    container_name: google-api
+    container_name: google-workspace-mcp
     restart: unless-stopped
     ports:
       - "${MCP_PORT:-8000}:${MCP_PORT:-8000}"   # host:container — both use MCP_PORT for consistency
@@ -29,7 +29,7 @@ services:
       GOOGLE_SCOPES_RAW: "${GOOGLE_SCOPES_RAW:-${GOOGLE_SCOPES}}"
 
       # MCP metadata
-      MCP_SERVER_NAME: "${MCP_SERVER_NAME:-google-api-bridge}"
+      MCP_SERVER_NAME: "${MCP_SERVER_NAME:-google-workspace-mcp}"
       MCP_SERVER_VERSION: "${MCP_SERVER_VERSION:-1.0.0}"
 
       # Logging

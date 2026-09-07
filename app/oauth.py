@@ -1,6 +1,6 @@
 """Google OAuth 2.0 flow — start, callback, state validation, PKCE.
 
-The Google API Bridge owns all OAuth logic. QwenPaw never sees
+The Google Workspace MCP owns all OAuth logic. the MCP client never sees
 authorization codes, tokens, or client secrets.
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ from google_auth_oauthlib.flow import Flow
 
 from app.config import settings
 
-log = logging.getLogger("google-api-bridge")
+log = logging.getLogger("google-workspace-mcp")
 
 # ── In-memory state store (transient) ──────────────────────────
 # Maps state → {redirect_uri, scopes, created_at}

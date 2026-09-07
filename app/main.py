@@ -1,4 +1,4 @@
-"""Google API Bridge — main FastAPI application.
+"""Google Workspace MCP — main FastAPI application.
 
 Exposes:
   GET  /healthz        — health check
@@ -152,7 +152,7 @@ logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-log = logging.getLogger("google-api-bridge")
+log = logging.getLogger("google-workspace-mcp")
 
 # ── MCP server ────────────────────────────────────────────────
 # Imported at module level so the session manager exists before the
@@ -165,7 +165,7 @@ from app.mcp_server import mcp, create_mcp_asgi
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks — including MCP session manager lifecycle."""
-    log.info("Google API Bridge starting up (v%s)", settings.mcp_server_version)
+    log.info("Google Workspace MCP starting up (v%s)", settings.mcp_server_version)
     log.info("External URL: %s", settings.external_url)
     log.info("OAuth callback: %s/oauth/callback", settings.external_url)
     log.info("MCP endpoint: %s/mcp", settings.external_url)
@@ -182,11 +182,11 @@ async def lifespan(app: FastAPI):
         log.info("MCP session manager started")
         yield
     log.info("MCP session manager stopped")
-    log.info("Google API Bridge shutting down")
+    log.info("Google Workspace MCP shutting down")
 
 
 app = FastAPI(
-    title="Google API Bridge",
+    title="Google Workspace MCP",
     version=settings.mcp_server_version,
     lifespan=lifespan,
 )
@@ -249,7 +249,7 @@ def healthz():
 @app.get("/")
 def root():
     return JSONResponse({
-        "service": "Google API Bridge",
+        "service": "Google Workspace MCP",
         "mcp_endpoint": "/mcp",
         "oauth_start": "/oauth/start",
         "healthz": "/healthz",
