@@ -8,7 +8,7 @@ gws-mcp — QwenPaw connects here via `streamable_http`.
 
 ```
  ┌──────────┐        ┌─────────────────┐      ┌─────────────────────┐
- │  User   │◄─HTTPS─│    Caddy        │ ◄─── │  google-api-bridge  │
+ │  User   │◄─HTTPS─│    Caddy        │ ◄─── │  google-api        │
  │ (browser)│  :443  │ (TLS proxy)     │  :8000│  (FastAPI + MCP)   │
  └──────────┘        └──────┬──────────┘      └──────┬──────────────┘
                             │                        │
@@ -63,6 +63,8 @@ docker compose up -d --build
 
 # 5. Caddy: add this domain to your Caddy config
 #    caddy fmt --overwrite Caddyfile && caddy reload
+#    NOTE: Caddyfile reverse_proxies to google-api:8000 —
+#    if you changed MCP_PORT in .env, update the port in Caddyfile too
 ```
 
 ## Configuration
@@ -70,7 +72,7 @@ docker compose up -d --build
 | Variable | Default | Description |
 |---|---|---|
 | `EXTERNAL_URL` | `https://google-api.mcp.dg.linkpc.net` | Public HTTPS URL for OAuth callback |
-| `MCP_PORT` | `8000` | Internal container port (host port mapped via docker-compose) |
+| `MCP_PORT` | `8000` | Host + container port (change in `.env` to relocate) |
 | `GOOGLE_CLIENT_SECRET_FILE` | `/config/client_secret.json` | Mount path for OAuth credentials |
 | `GOOGLE_TOKEN_FILE` | `/config/token.json` | Auto-generated refresh token |
 | `GOOGLE_SCOPES` | *(read-only default)* | Comma-separated Google API scopes |
@@ -143,8 +145,9 @@ Use the setup script to generate the driver config from `.env`:
 ```bash
 # In the bridge project directory
 ./scripts/install-mcp-driver.sh
-# → reads EXTERNAL_URL from .env, writes driver config to
-#   /root/workspace/projects/qwenpaw-assistant/data/drivers/mcp/google-api-bridge.yaml
+# → reads MCP_PORT from .env, writes driver config to
+#   /app/working/workspaces/default/drivers/mcp/google-api-bridge.yaml
+#   (AUTH_TOKEN header uses ${AUTH_TOKEN} — QwenPaw resolves it at runtime)
 ```
 
 Then restart QwenPaw:
@@ -154,13 +157,13 @@ qwenpaw daemon restart
 
 ### Option B — Manual
 
-1. Set `EXTERNAL_URL` in the bridge `.env` (e.g. `https://google-api.mcp.dg.linkpc.net`)
-2. Set the same `EXTERNAL_URL` in QwenPaw's `.env`:
-   ```
-   EXTERNAL_URL=https://google-api.mcp.dg.linkpc.net
-   ```
-3. Copy `drivers/mcp/google-api-bridge.yaml` to QwenPaw's `data/drivers/mcp/`
-4. Replace `__EXTERNAL_URL__` in the YAML with your actual domain
+1. Set `AUTH_TOKEN` in the bridge `.env` (e.g. `AUTH_TOKEN=your-secret-here`)
+2. Set the **same** `AUTH_TOKEN` as an environment variable in QwenPaw's
+   runtime (same value as in the bridge `.env`)
+3. Copy `drivers/mcp/google-api-bridge.yaml` to QwenPaw's
+   `data/drivers/mcp/`
+4. Replace `__MCP_PORT__` in the YAML with the port from your `.env`
+   (default `8000`) — e.g. `http://127.0.0.1:8000/mcp/`
 5. Restart QwenPaw
 
 ### QwenPaw auth model
@@ -184,15 +187,15 @@ pip install -r requirements.txt pytest
 pytest tests/ -v
 
 # Health check
-curl http://localhost:8090/healthz
+curl http://localhost:${MCP_PORT:-8000}/healthz
 
 # OAuth status (check if token is stored)
-curl http://localhost:8090/oauth/status
+curl http://localhost:${MCP_PORT:-8000}/oauth/status
 
 # MCP protocol test (requires EXTERNAL_URL host header for transport security)
 curl -H "Host: $(grep EXTERNAL_URL .env | cut -d= -f2-)" \
      -H "Accept: application/json, text/event-stream" \
-     -X POST http://localhost:8090/mcp/ \
+     -X POST http://localhost:${MCP_PORT:-8000}/mcp/ \
      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}'
 ```
 

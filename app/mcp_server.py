@@ -14,8 +14,6 @@ from mcp.server import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from app.config import settings
-
-from app.config import settings
 from app.tools.gmail import gmail_search as _gmail_search, gmail_get_message as _gmail_get, gmail_send as _gmail_send, gmail_create_draft as _gmail_create_draft
 from app.tools.drive import drive_search as _drive_search, drive_get_file as _drive_get, drive_upload_file as _drive_upload, drive_create_file as _drive_create, drive_delete_file as _drive_delete
 from app.tools.docs import docs_get as _docs_get, docs_create as _docs_create, docs_update as _docs_update

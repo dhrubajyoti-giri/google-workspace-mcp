@@ -4,7 +4,7 @@ services:
     container_name: google-api
     restart: unless-stopped
     ports:
-      - "${MCP_PORT:-8000}:8000"   # internal-only; Caddy on host proxies public traffic
+      - "${MCP_PORT:-8000}:${MCP_PORT:-8000}"   # host:container — both use MCP_PORT for consistency
     env_file:
       - .env
     environment:
