@@ -170,5 +170,12 @@ class Settings(BaseSettings):
     tz: str = Field(default="Asia/Kolkata", validation_alias=AliasChoices("TZ", "TZ_VALUE"))
     log_level: str = "INFO"
 
+    # ── Scope selector UI mode ──
+    # "all"       → show every available Google scope in the selector (user picks freely)
+    # "requested" → show only scopes requested by the MCP client (plus existing grants)
+    scope_selector_mode: str = Field(
+        default="all",
+        validation_alias=AliasChoices("SCOPE_SELECTOR_MODE"),
+    )
 
 settings = Settings()

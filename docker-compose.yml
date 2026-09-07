@@ -3,6 +3,8 @@ services:
     build: .
     container_name: google-workspace-mcp
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MCP_PORT:-8000}:8000"
     # All runtime config via env_file only (no environment: block)
     env_file:
       - .env

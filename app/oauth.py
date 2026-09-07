@@ -233,7 +233,8 @@ def scope_selector(request: Request):
     auth_req = provider._auth_requests.get(rid)
     client_scopes = auth_req["scopes"] if auth_req else []
 
-    return _render_scope_form(rid, email, existing_scopes, client_scopes, request)
+    mode = settings.scope_selector_mode
+    return _render_scope_form(rid, email, existing_scopes, client_scopes, mode, request)
 
 
 @router.post("/scale", response_class=HTMLResponse)
@@ -393,55 +394,61 @@ def _error_page(message: str) -> HTMLResponse:
     )
 
 
-def _render_scope_form(rid: str, email: str, existing: list[str], client_scopes: list[str], request: Request) -> HTMLResponse:
+def _render_scope_form(rid: str, email: str, existing: list[str], client_scopes: list[str], mode: str, request: Request) -> HTMLResponse:
     """Render the scope selection HTML form.
 
-    Shows all Google API scopes grouped by service, with the user's
-    existing grants pre-selected (so re-auth adds rather than replaces).
+    **mode** controls which scopes are shown:
+      - "all"       → show every available Google scope (default)
+      - "requested" → show only scopes the MCP client requested
+
+    In both modes the user's existing grants are pre-selected so that
+    re-auth *adds* rather than *replaces*.
+
+    Read-only and write/delete scopes are visually separated so that
+    higher-risk scopes are clearly flagged.
     """
     labels = settings.scope_labels
     all_scopes = settings.all_scopes
 
-    # Categorize scopes by service (for better grouping)
-    categories = {
-        "Gmail": [s for s in all_scopes if "gmail" in s],
-        "Google Drive": [s for s in all_scopes if "drive" in s],
-        "Docs": [s for s in all_scopes if "documents" in s],
-        "Sheets": [s for s in all_scopes if "spreadsheets" in s],
-        "Calendar": [s for s in all_scopes if "calendar" in s],
-        "Presentations": [s for s in all_scopes if "presentations" in s],
-        "Other": [s for s in all_scopes if s.startswith("openid") or "userinfo" in s],
-    }
-    # Remaining scopes go in "Other"
-    categorized = set()
-    for scopes in categories.values():
-        for s in scopes:
-            categorized.add(s)
-    categories["Other"].extend([s for s in all_scopes if s not in categorized and "drive" not in s and "gmail" not in s and "documents" not in s and "spreadsheets" not in s and "calendar" not in s and "presentations" not in s])
+    # ── Determine which scopes to show in the selector ──
+    if mode == "requested":
+        visible_scopes = [s for s in all_scopes if s in client_scopes]
+    else:
+        visible_scopes = all_scopes
 
-    def _checkbox(scope: str, checked: bool = False) -> str:
-        field_name = "scope_" + scope.replace("://", "_").replace("/", "_")
-        label = labels.get(scope, scope)
-        # Truncate long scope names
-        display = label if len(label) < 50 else label[:47] + "..."
+    labels_map = settings.scope_labels
+
+    def _field_name(scope: str) -> str:
+        return "scope_" + scope.replace("://", "_").replace("/", "_")
+
+    def _checkbox(scope: str, checked: bool = False, css_class: str = "scope-read") -> str:
+        field = _field_name(scope)
+        label = labels_map.get(scope, scope)
+        display = label if len(label) < 60 else label[:57] + "..."
         checked_attr = "checked" if checked else ""
         return (
-            f'<label style="display:block;padding:4px 0;font-size:13px;">'
-            f'<input type="checkbox" name="{field_name}" value="1" {checked_attr}>'
+            f'<label class="{css_class}" style="display:flex;align-items:center;gap:6px;'
+            f'padding:4px 0;font-size:13px;">'
+            f'<input type="checkbox" name="{field}" value="1" {checked_attr}>'
             f' {display}</label>'
         )
 
-    def _group(title: str, scopes: list[str]) -> str:
+    def _group(title: str, scopes: list[str], css_class: str = "scope-read") -> str:
         if not scopes:
             return ""
-        items = "".join(_checkbox(s, checked=s in existing) for s in scopes)
+        items = "".join(_checkbox(s, checked=s in existing, css_class=css_class) for s in scopes)
         return (
-            f'<fieldset style="margin:12px 0;padding:12px;border:1px solid #e0e0e0;border-radius:6px;">'
+            f'<fieldset class="{css_class}" style="margin:12px 0;padding:12px;border:1px solid #e0e0e0;border-radius:6px;">'
             f'<legend style="font-weight:600;font-size:13px;color:#555;padding:0 6px;">{title}</legend>'
             f'{items}</fieldset>'
         )
 
     email_label = email if email else "New user"
+    mode_label = "All available scopes" if mode == "all" else "Scopes requested by client"
+
+    # Split visible scopes into read-only and write/delete
+    read_scopes = [s for s in visible_scopes if s in settings._read_scopes or s in ("openid",)]
+    write_scopes = [s for s in visible_scopes if s not in read_scopes]
 
     return HTMLResponse(f"""<!DOCTYPE html>
 <html><head><title>Select Scopes</title>
@@ -451,35 +458,32 @@ def _render_scope_form(rid: str, email: str, existing: list[str], client_scopes:
   .container{{background:white;padding:25px;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
   h1{{font-size:22px;color:#1a1a1a}}
   .user{{font-size:14px;color:#666;margin:10px 0 20px;font-weight:500}}
+  .mode-badge{{font-size:11px;background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:4px;display:inline-block}}
   fieldset{{margin:12px 0;border:1px solid #e0e0e0;border-radius:6px;padding:12px}}
   legend{{font-weight:600;font-size:13px;color:#555;padding:0 6px}}
   button{{background:#0066cc;color:white;border:none;padding:12px 24px;border-radius:6px;
           font-size:14px;cursor:pointer;width:100%;font-weight:600;margin-top:10px}}
   button:hover{{background:#0052a3}}
   p.note{{font-size:12px;color:#999;margin-top:15px}}
+  label.scope-read{{color:#2e7d37}}
+  label.scope-read input[type=checkbox]{{accent-color:#2e7d37}}
+  label.scope-write{{color:#e65100;font-weight:500}}
+  label.scope-write input[type=checkbox]{{accent-color:#e65100}}
+  fieldset.scope-write{{border-color:#ffcc80;background:#fff3e0}}
 </style></head><body>
 <div class="container">
   <h1>Google Workspace MCP — Scope Selection</h1>
   <p class="user">Account: {email_label}</p>
+  <p><span class="mode-badge">{mode_label}</span></p>
   <form method="POST" action="/oauth/scale?rid={rid}">
-    <p style="font-size:13px;color:#666;">Select which Google Workspace access you grant to this MCP server:</p>
-    {_group("Gmail", categories["Gmail"])}
-    {_group("Google Drive", categories["Google Drive"])}
-    {_group("Docs", categories["Docs"])}
-    {_group("Sheets", categories["Sheets"])}
-    {_group("Calendar", categories["Calendar"])}
-    {_group("Presentations", categories["Presentations"])}
-    {_group("Other", categories["Other"])}
+    <p style="font-size:13px;color:#666;">Select which Google Workspace access you grant to this MCP server.</p>
+    {_group("Read-only scopes", read_scopes, css_class="scope-read")}
+    {_group("Write / Delete scopes (higher risk)", write_scopes, css_class="scope-write")}
     <button type="submit">Authorize with Google</button>
-    <p class="note">Existing grants are pre-selected. New grants are added to your existing scopes.</p>
+    <p class="note">Existing grants are pre-checked. New grants are added to your existing scopes.</p>
   </form>
 </div>
 </body></html>""")
-
-
-
-
-
 def _success_page_with_token(email: str, scopes: list[str], access_token: str) -> HTMLResponse:
     """Success page for manual OAuth flow — shows MCP bearer token."""
     import urllib.parse

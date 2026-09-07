@@ -5,7 +5,7 @@ A standalone MCP server exposing Google Workspace tools (Gmail, Drive, Docs, She
 ## How It Works
 
 ```
-MCP Client (QwenPaw / Claude Desktop / Inspector)
+MCP Client (QwenPaw / Claude Desktop / Claude Code)
   │
   │ POST /mcp/ (no token)
   ├── 401 with WWW-Authenticate: Bearer resource_metadata="https://.../oauth-protected-resource/mcp"
@@ -102,8 +102,6 @@ The MCP client auto-discovers OAuth on first connect — **no token in the confi
 claude mcp add google-workspace-mcp --transport http --url http://127.0.0.1:8000/mcp/
 ```
 
-**MCP Inspector** — enter `http://127.0.0.1:8000/mcp/` as the Streamable HTTP URL.
-
 ### 6. Authorize
 
 On first MCP tool call, your client will:
@@ -155,6 +153,7 @@ Plus always included: `openid`, `userinfo.email`, `userinfo.profile`
 | `MCP_ACCESS_TOKEN_TTL` | `28800` | MCP access token lifetime in seconds (8h) — client auto-refreshes |
 | `MCP_REFRESH_TOKEN_TTL` | `2592000` | MCP refresh token lifetime in seconds (30d) |
 | `MCP_AUTH_CODE_TTL` | `600` | MCP authorization code lifetime in seconds (10 min) |
+| `SCOPE_SELECTOR_MODE` | `all` | `all` (default — show every available scope in selector) · `requested` (show only MCP-client-requested scopes) |
 | `SECRETS_VOLUME_PATH` | `/path/to/secrets` | Host directory for `client_secret.json` + `registry.json` |
 | `TZ` | `Asia/Kolkata` | Timezone |
 | `LOG_LEVEL` | `INFO` | Log verbosity |
@@ -235,5 +234,15 @@ Any MCP client supporting OAuth 2.0 Dynamic Client Registration + PKCE:
 - QwenPaw
 - Claude Desktop
 - Claude Code
-- MCP Inspector
 - Any compliant implementation
+
+## Token Management
+
+Once a Google account is authorized (entry created in `registry.json`), the
+user does **not** need to re-authorize until that entry is removed.
+Google's refresh token persists in the registry; when the Google access
+token expires, the bridge silently refreshes it — no user interaction
+needed.
+
+If you need to remove an account, delete its entry from `registry.json`
+(the secrets volume mount) and restart the container.

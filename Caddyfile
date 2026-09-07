@@ -1,14 +1,16 @@
 # ═════════════════════════════════════════════════════════════
 # Caddy reverse proxy for the Google Workspace MCP (default mode)
 #
-# This is the DEFAULT mode: /mcp/* is blocked from the public
-# internet. MCP clients (QwenPaw, Inspector, etc.) connect directly
+# DEFAULT mode: /mcp/* is BLOCKED from the public internet.
+# MCP clients (QwenPaw, Claude Desktop, Claude Code) connect directly
 # to the container on localhost:
 #
 #   http://127.0.0.1:8000/mcp/
 #
-# The bearer-token auth on /mcp is defense-in-depth; in this mode
-# the proxy itself is the primary barrier.
+# The bearer-token (JWT) auth on /mcp *is* functional, but the 403
+# block is a second layer — defense-in-depth. If you prefer to rely
+# solely on JWT and expose /mcp publicly, use the
+# Caddyfile.example-full-proxy instead.
 #
 # ── Public endpoints (allowed from anywhere) ──
 #   OAuth discovery: /.well-known/oauth-authorization-server
@@ -18,7 +20,7 @@
 #   Health:          /healthz, /
 #
 # ── Blocked endpoints ──
-#   /mcp/* — proxied only via localhost, 403 from public internet
+#   /mcp/* — localhost only, 403 from public internet
 #
 # Copy this domain block into your Caddy instance and set
 # YOUR_DOMAIN_HERE to your EXTERNAL_URL domain (e.g. mcp.example.com).
