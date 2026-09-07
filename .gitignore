@@ -30,6 +30,9 @@ dist/
 # Session-local todo files
 *_TODO.md
 
+# Generated driver configs
+drivers/mcp/google-api-bridge-generated.yaml
+
 # IDE
 .vscode/
 .idea/

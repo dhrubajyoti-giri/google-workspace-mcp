@@ -140,18 +140,22 @@ literally into the driver config.
 
 ### Option A — Automated (recommended)
 
-Use the setup script to generate the driver config from `.env`:
+Use the config generation script to produce the driver YAML from `.env`:
 
 ```bash
 # In the bridge project directory
-./scripts/install-mcp-driver.sh
-# → reads MCP_PORT from .env, writes driver config to
-#   /app/working/workspaces/default/drivers/mcp/google-api-bridge.yaml
-#   (AUTH_TOKEN header uses ${AUTH_TOKEN} — QwenPaw resolves it at runtime)
+./scripts/gen-mcp-driver-config.sh
+# → reads MCP_PORT + AUTH_TOKEN from .env
+# → prints the config to console
+# → saves to drivers/mcp/google-api-bridge-generated.yaml
+#   (NOT auto-installed — you do it manually)
 ```
 
-Then restart QwenPaw:
+Then manually copy the generated config to QwenPaw and restart:
+
 ```bash
+cp drivers/mcp/google-api-bridge-generated.yaml \
+   /app/working/workspaces/default/drivers/mcp/google-api-bridge.yaml
 qwenpaw daemon restart
 ```
 
