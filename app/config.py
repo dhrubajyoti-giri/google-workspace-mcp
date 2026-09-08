@@ -111,16 +111,16 @@ class Settings(BaseSettings):
 
         Order:
         1. AVAILABLE_SCOPES env var (if set — user's custom list)
-        2. _read_scopes + _write_scopes + optional _chat_scopes (default fallback)
-        Always includes identity scopes (openid, userinfo.email, userinfo.profile).
+        2. Identity scopes only (openid, userinfo.email, userinfo.profile)
+           — safe default; MCP tools won't work until AVAILABLE_SCOPES is set.
         """
         env_scopes = _parse_scopes(self.available_scopes_raw)
         if env_scopes:
             scopes = env_scopes
         else:
-            scopes = self._read_scopes + self._write_scopes
-            if self.enable_chat_scopes:
-                scopes += self._chat_scopes
+            # Safe default: identity scopes only. User MUST set AVAILABLE_SCOPES
+            # to enable Google API tool access.
+            scopes = []
         # Identity scopes are always needed
         for s in ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"):
             if s not in scopes:
@@ -145,13 +145,14 @@ class Settings(BaseSettings):
     def default_scopes(self) -> list[str]:
         """Default Google scopes used if MCP client doesn't request any.
 
-        Defaults to read-only scopes only (safest default). Override via
-        AVAILABLE_SCOPES if you want wider defaults.
+        Defaults to identity scopes only when AVAILABLE_SCOPES is not set.
+        Set AVAILABLE_SCOPES to enable Google API tool access.
         """
         env_scopes = _parse_scopes(self.available_scopes_raw)
         if env_scopes:
             return env_scopes
-        return self._read_scopes + [
+        # Safe default: identity scopes only
+        return [
             "openid",
             "https://www.googleapis.com/auth/userinfo.email",
             "https://www.googleapis.com/auth/userinfo.profile",
