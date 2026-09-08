@@ -220,6 +220,7 @@ required. Remove an account by deleting its entry from `registry.json`.
 | `404` on `/.well-known/oauth-authorization-server` | Check `EXTERNAL_URL` matches your Caddy domain |
 | Client can't discover OAuth | Verify `EXTERNAL_URL` is publicly reachable over HTTPS |
 | `client_secret.json not found` | Mount it at `/secrets/client_secret.json` (or your configured path) |
+| `500` on `/oauth/callback` after scope change | Google OAuth scope-mismatch Warning caught — token is recovered automatically; restart the flow (codes are single-use) |
 
 ## Project Structure
 
@@ -251,13 +252,4 @@ Any MCP client supporting OAuth 2.0 Dynamic Client Registration + PKCE:
 - Claude Code
 - Any compliant implementation
 
-## Token Management
 
-Once a Google account is authorized (entry created in `registry.json`), the
-user does **not** need to re-authorize until that entry is removed.
-Google's refresh token persists in the registry; when the Google access
-token expires, the bridge silently refreshes it — no user interaction
-needed.
-
-If you need to remove an account, delete its entry from `registry.json`
-(the secrets volume mount) and restart the container.

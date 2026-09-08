@@ -113,17 +113,47 @@ def _google_auth_url(scopes: list[str], state: str, access_type: str = "offline"
     return auth_url
 
 
+def _build_creds_from_token(token_response: dict[str, Any], flow: Any) -> Any:
+    """Build Google Credentials from a token response dict.
+
+    This is used when flow.credentials fails (e.g., after a scope-mismatch
+    Warning from include_granted_scopes). Builds Credentials directly from
+    the raw token response returned by Google's token endpoint.
+    """
+    from google.oauth2.credentials import Credentials as GCredentials
+    import datetime
+
+    client_config = flow.client_config.get("web", {})
+    scope_str = token_response.get("scope", "")
+    scopes = scope_str.split() if scope_str else []
+
+    creds = GCredentials(
+        token=token_response.get("access_token"),
+        refresh_token=token_response.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=client_config.get("client_id"),
+        client_secret=client_config.get("client_secret"),
+        scopes=scopes,
+    )
+
+    # Set expiry from token response
+    expires_in = token_response.get("expires_in")
+    if expires_in:
+        creds.expiry = datetime.datetime.utcnow() + datetime.timedelta(seconds=int(expires_in))
+
+    return creds
+
+
 def _exchange_code(code: str, state: str) -> tuple[dict[str, Any], Any]:
     """Exchange Google authorization code for token.
 
     Returns (token_response_dict, flow_object).
-    The flow object is needed for email extraction and credential building.
-    Uses flow.fetch_token() (not oauth2session.fetch_token()) to ensure
-    flow.credentials is populated.
 
     Handles the "scope mismatch" warning (oauthlib raises a Warning when
     include_granted_scopes causes previously-granted scopes to mismatch)
-    by recovering the token from flow.oauth2session.token.
+    by recovering the token from the oauth2session. The returned flow may
+    have a broken .credentials property after Warning recovery — callers
+    should use _build_creds_from_token() as a fallback.
     """
     stored = _google_state_store.pop(state, None)
     if not stored:
@@ -135,16 +165,28 @@ def _exchange_code(code: str, state: str) -> tuple[dict[str, Any], Any]:
     try:
         token_response = flow.fetch_token(code=code)
     except (Exception, Warning) as e:
-        # oauthlib may raise a Warning (not Error) when scopes change due to
+        # oauthlib may raise a Warning when scopes change due to
         # include_granted_scopes. The token is usually already in the session.
-        # Recover it and rebuild the token response.
         log.warning("flow.fetch_token raised %s: %s — attempting token recovery", type(e).__name__, e)
         sess = flow.oauth2session
-        if not hasattr(sess, "token") or sess.token is None:
+        # Check truthiness (not just None) — sess.token may be {} (falsy)
+        if not hasattr(sess, "token") or not sess.token:
             raise  # real error, re-raise
         token_response = sess.token
 
     return token_response, flow
+
+
+def _safe_get_credentials(token_response: dict[str, Any], flow: Any) -> Any:
+    """Get a Credentials object, trying flow.credentials first then token_response."""
+    try:
+        creds = flow.credentials
+        if creds and creds.token:
+            return creds
+    except Exception:
+        pass
+    # Fallback: build from token_response directly
+    return _build_creds_from_token(token_response, flow)
 
 
 def _extract_email(token_response: dict[str, Any], flow: Any) -> str | None:
@@ -153,8 +195,14 @@ def _extract_email(token_response: dict[str, Any], flow: Any) -> str | None:
     Method 1: decode the id_token JWT (fast, no network).
     Method 2: call the Google userinfo API (fallback).
     """
-    # Method 1: decode id_token (JWT)
-    id_token_value = token_response.get("id_token") or getattr(flow.credentials, "id_token", None)
+    # Method 1: decode id_token (JWT) — prefer token_response, fall back to creds
+    id_token_value = token_response.get("id_token")
+    if not id_token_value:
+        try:
+            creds = _safe_get_credentials(token_response, flow)
+            id_token_value = getattr(creds, "id_token", None)
+        except Exception:
+            pass
     if id_token_value:
         import jwt
         try:
@@ -165,12 +213,14 @@ def _extract_email(token_response: dict[str, Any], flow: Any) -> str | None:
         except Exception as e:
             log.warning("Failed to decode id_token: %s", e)
 
-    # Method 2: call userinfo API
+    # Method 2: call userinfo API (fallback)
     try:
         from googleapiclient.discovery import build
-        service = build("oauth2", "v2", credentials=flow.credentials)
-        user_info = service.userinfo().get().execute()
-        return user_info.get("email")
+        creds = _safe_get_credentials(token_response, flow)
+        if creds:
+            service = build("oauth2", "v2", credentials=creds)
+            user_info = service.userinfo().get().execute()
+            return user_info.get("email")
     except Exception:
         pass
 
@@ -179,7 +229,7 @@ def _extract_email(token_response: dict[str, Any], flow: Any) -> str | None:
 
 def _build_token_data(token_response: dict[str, Any], flow: Any) -> dict[str, Any]:
     """Build a Google Credentials-compatible dict for registry storage."""
-    creds = flow.credentials
+    creds = _safe_get_credentials(token_response, flow)
     # Use scopes from the token response (reflects what Google actually granted,
     # including previously granted scopes via include_granted_scopes=true)
     scope_str = token_response.get("scope", "")
