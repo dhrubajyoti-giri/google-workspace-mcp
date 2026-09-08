@@ -1,17 +1,20 @@
-"""OAuth flow: two-step Google OAuth + scope selection + MCP auth code.
+"""OAuth flow: single-step Google OAuth + MCP auth code.
 
 This module implements the web UI layer on top of the OAuthAuthorizationServerProvider.
 
 Flow (from MCP client via /authorize):
   1. MCP client -> /authorize -> provider.authorize() -> redirect to /oauth/scale?rid=XXX
-  2. /oauth/scale -> (no email yet) -> redirect to Google (scope=openid email)  [identify]
-  3. Google -> /oauth/callback?code=...&state=XXX|identify
-  4. Callback -> exchange code -> extract email -> store in session -> redirect to /oauth/scale
-  5. /oauth/scale -> render scope selection form (pre-populated from registry if user exists)
-  6. User POST /oauth/scale -> redirect to Google (scope=selected)  [authorize]
-  7. Google -> /oauth/callback?code=...&state=XXX|authorize
-  8. Callback -> exchange code -> store in registry -> generate MCP auth code
-  9. Redirect to MCP client's redirect_uri with ?code=<mcp_code>&state=<original_state>
+  2. /oauth/scale -> determine scopes (all or client-requested) -> redirect to Google
+     with openid + email + api scopes in ONE redirect (no scope selection form)
+  3. Google -> /oauth/callback?code=...&state=XXX|auth
+  4. Callback -> exchange code -> extract email -> store in registry -> generate MCP auth code
+  5. Redirect to MCP client's redirect_uri with ?code=<mcp_code>&state=<original_state>
+
+Google's consent page shows the requested scopes. The user can accept or deny.
+SCOPE_SELECTOR_MODE determines which scopes are sent:
+  - "all"      -> all AVAILABLE_SCOPES (+ identity scopes)
+  - "requested" -> only the MCP client's requested scopes (+ identity scopes)
+No per-user scope selection UI — Google's consent page is the selector.
 
 """
 from __future__ import annotations
@@ -300,8 +303,9 @@ def _build_token_data(token_response: dict[str, Any], flow: Any) -> dict[str, An
 def scope_selector(request: Request):
     """Entry point from /authorize (via provider).
 
-    Step A: If user not yet identified -> redirect to Google (minimal scopes).
-    Step B: If user identified -> render scope selection form.
+    Single-step auth: determine which scopes to send to Google based on
+    SCOPE_SELECTOR_MODE, then redirect to Google in ONE redirect.
+    No scope selection form -- Google's consent page is the selector.
     """
     rid = request.query_params.get("rid")
     if not rid:
@@ -309,80 +313,32 @@ def scope_selector(request: Request):
 
     _cleanup_stores()
 
-    # Check if user was already identified (from step 1)
-    session = _callback_session.get(rid)
-    if not session or not session.get("email"):
-        # Check if scope selector is in skip mode (single-step auth)
-        if settings.scope_selector_mode == "skip":
-            # Direct to Google with default scopes + identity scopes in one step.
-            # No separate identify → chooser → authorize flow.
-            scopes = list(settings.default_scopes)
-            for s in ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"):
-                if s not in scopes:
-                    scopes.append(s)
-            state = f"{rid}|skip_auth"
-            auth_url = _google_auth_url(
-                scopes=scopes,
-                state=state,
-                access_type="offline",
-                include_granted=False,
-            )
-            return RedirectResponse(url=auth_url, status_code=302)
-
-        # Step A: redirect to Google to identify the user (step 1)
-        state = f"{rid}|identify"
-        auth_url = _google_auth_url(
-            scopes=["openid", "https://www.googleapis.com/auth/userinfo.email"],
-            state=state,
-            access_type="online",  # no refresh token needed in identify step
-            include_granted=False,  # minimal consent screen — no previously granted scopes
-        )
-        return RedirectResponse(url=auth_url, status_code=302)
-
-    # Step B: render scope selection form
-    email = session["email"]
-    existing_scopes = registry.get_scopes(email) or []
     auth_req = provider._auth_requests.get(rid)
     client_scopes = auth_req["scopes"] if auth_req else []
 
     mode = settings.scope_selector_mode
-    return _render_scope_form(rid, email, existing_scopes, client_scopes, mode, request)
+    if mode == "requested":
+        # Only send scopes the MCP client explicitly requested
+        api_scopes = list(client_scopes) if client_scopes else list(settings.all_scopes)
+    else:
+        # "all" (default) -- send all available scopes
+        api_scopes = list(settings.all_scopes)
 
+    # Always include identity scopes
+    for s in ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"):
+        if s not in api_scopes:
+            api_scopes.append(s)
 
-@router.post("/scale", response_class=HTMLResponse)
-async def scope_submit(request: Request):
-    """Handle scope selection submission -> redirect to Google with selected scopes."""
-    rid = request.query_params.get("rid")
-    if not rid:
-        return _error_page("Missing request ID")
-
-    _cleanup_stores()
-    session = _callback_session.get(rid)
-    if not session:
-        return _error_page("Session expired. Please try again.")
-
-    # Parse selected scopes from the form
-    form = await request.form()
-    selected = []
-    for scope in settings.all_scopes:
-        # Checkboxes are named "scope_<encoded_scope>"
-        field_name = "scope_" + scope.replace("://", "_").replace("/", "_")
-        if form.get(field_name):
-            selected.append(scope)
-
-    if not selected:
-        return _error_page("Please select at least one scope.")
-
-    session["selected_scopes"] = selected
-
-    # Redirect to Google with selected scopes (step: authorize).
-    # include_granted=False: do NOT use incremental authorization. Previously
-    # granted scopes (including stale ones from old code versions) would leak
-    # in via include_granted_scopes=true, causing oauthlib scope-mismatch
-    # warnings and "Scope has changed" errors. Starting fresh each time ensures
-    # the Google token contains EXACTLY the selected scopes.
-    state = f"{rid}|authorize"
-    auth_url = _google_auth_url(scopes=selected, state=state, include_granted=False)
+    # Single redirect to Google with all scopes at once.
+    # include_granted=False ensures Google returns EXACTLY these scopes
+    # (no stale scopes from prior authorizations).
+    state = f"{rid}|auth"
+    auth_url = _google_auth_url(
+        scopes=api_scopes,
+        state=state,
+        access_type="offline",
+        include_granted=False,
+    )
     return RedirectResponse(url=auth_url, status_code=302)
 
 
@@ -426,97 +382,34 @@ def callback(request: Request):
     if auth_req is None:
         return _error_page("Request expired. Please restart authorization via your MCP client.")
 
-    if step == "identify":
-        # Step 1: identify the user → store email → redirect to scope form
+    if step == "auth":
+        # Single-step auth: Google returned everything (email + token) in one redirect.
+        # Scopes sent were determined by SCOPE_SELECTOR_MODE (all or requested).
         email = _extract_email(token_response, flow)
-        if not email:
-            return _error_page("Could not determine your Google email. Please try again.")
-
-        _callback_session[rid] = {
-            "email": email,
-            "selected_scopes": None,
-            "expires_at": time.time() + 600,
-        }
-        log.info("User identified: %s", email)
-
-        # Redirect to scope selection page
-        return RedirectResponse(
-            url=f"{settings.external_url}/oauth/scale?rid={rid}",
-            status_code=302,
-        )
-
-    elif step == "authorize":
-        # Step 2: user authorized with selected scopes -> store in registry
-        session = _callback_session.get(rid, {})
-        email = session.get("email")
-        if not email:
-            # Fallback: extract email from this token response too
-            email = _extract_email(token_response, flow)
-
         if not email:
             return _error_page("Could not determine user email.")
 
-        # Use ONLY the user-selected scopes for the MCP token and registry.
-        # The Google token (in creds_data) still has all granted scopes
-        # (including stale ones from previous authorizations via
-        # include_granted_scopes=true), but the MCP token and scope chooser
-        # should only track what the user explicitly selected. This prevents
-        # stale scopes (e.g. gmail.drafts from an old code version) from
-        # leaking into the MCP token and causing "scope has changed" errors.
-        granted_scopes = session.get("selected_scopes") or settings.default_scopes
+        # Remove identity scopes — they are for auth, not Google API access.
+        scope_str = token_response.get("scope", "")
+        if isinstance(scope_str, list):
+            all_granted = scope_str
+        elif isinstance(scope_str, str) and scope_str:
+            all_granted = scope_str.split()
+        else:
+            all_granted = []
+        identity_scopes = ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile")
+        granted_scopes = [s for s in all_granted if s not in identity_scopes]
 
         # Store in registry (keyed by Google email)
         creds_data = _build_token_data(token_response, flow)
         registry.save(email, creds_data, granted_scopes)
-
-        # Clean up in-memory stores
-        provider._auth_requests._requests.pop(rid, None)
-        del _callback_session[rid]
-
-        if auth_req.get("redirect_uri"):
-            # MCP OAuth flow -> generate auth code -> redirect to MCP client
-            mcp_code = provider._generate_mcp_auth_code(
-                client_id=auth_req["client_id"],
-                code_challenge=auth_req.get("code_challenge", ""),
-                redirect_uri=auth_req.get("redirect_uri", ""),
-                scopes=granted_scopes,
-                subject=email,
-            )
-
-            redirect_uri = auth_req.get("redirect_uri", "")
-            mcp_state = auth_req.get("mcp_state", "")
-            params = f"code={mcp_code}&state={mcp_state}"
-            return RedirectResponse(url=f"{redirect_uri}?{params}", status_code=302)
-        else:
-            # Manual flow -> show success page
-            log.info("Manual OAuth complete for %s, scopes=%d", email, len(granted_scopes))
-            # Generate a short-lived MCP access token for testing
-            access_token = provider._issue_access_token(email, granted_scopes)
-            return _success_page_with_token(email, granted_scopes, access_token)
-
-    elif step == "skip_auth":
-        # Single-step auth (SCOPE_SELECTOR_MODE=skip):
-        # Google OAuth with default_scopes + identity scopes in one redirect.
-        # The callback receives everything (email + access token) at once.
-        email = _extract_email(token_response, flow)
-        if not email:
-            return _error_page("Could not determine user email.")
-
-        granted_scopes = list(settings.default_scopes)
-        # Remove identity scopes from the MCP token scope set (they're internal)
-        for s in ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"):
-            if s in granted_scopes:
-                granted_scopes.remove(s)
-
-        # Store in registry
-        creds_data = _build_token_data(token_response, flow)
-        registry.save(email, creds_data, granted_scopes)
-        log.info("Single-step auth complete for %s, scopes=%d", email, len(granted_scopes))
+        log.info("Auth complete for %s, scopes=%d", email, len(granted_scopes))
 
         # Clean up in-memory stores
         provider._auth_requests._requests.pop(rid, None)
 
         if auth_req.get("redirect_uri"):
+            # MCP OAuth flow: generate auth code → redirect to MCP client
             mcp_code = provider._generate_mcp_auth_code(
                 client_id=auth_req["client_id"],
                 code_challenge=auth_req.get("code_challenge", ""),
@@ -531,7 +424,6 @@ def callback(request: Request):
         else:
             access_token = provider._issue_access_token(email, granted_scopes)
             return _success_page_with_token(email, granted_scopes, access_token)
-
 
 # ── HTML rendering ──────────────────────────────────────────────────────────
 
@@ -548,126 +440,6 @@ def _error_page(message: str) -> HTMLResponse:
     )
 
 
-def _render_scope_form(rid: str, email: str, existing: list[str], client_scopes: list[str], mode: str, request: Request) -> HTMLResponse:
-    """Render the scope selection HTML form with Select All / Deselect All / Reset."""
-    labels = settings.scope_labels
-    all_scopes = settings.all_scopes
-
-    if mode == "requested":
-        visible_scopes = [s for s in all_scopes if s in client_scopes]
-    else:
-        visible_scopes = all_scopes
-
-    labels_map = settings.scope_labels
-
-    def _field_name(scope):
-        return "scope_" + scope.replace("://", "_").replace("/", "_")
-
-    def _checkbox(scope, checked=False, css_class="scope-read"):
-        field = _field_name(scope)
-        label = labels_map.get(scope, scope)
-        display = label if len(label) < 60 else label[:57] + "..."
-        checked_attr = "checked" if checked else ""
-        html = '<label class="%s" style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:13px;cursor:pointer;">' % css_class
-        html += '<input type="checkbox" name="%s" value="1" %s> %s</label>' % (field, checked_attr, display)
-        return html
-
-    def _group(title, scopes, css_class="scope-read", is_write=False):
-        if not scopes:
-            return ""
-        items = "".join(_checkbox(s, checked=s in existing, css_class=css_class) for s in scopes)
-        legend_color = "#e65100" if is_write else "#555"
-        html = '<fieldset class="group-%s" style="margin:14px 0;padding:14px;border:1px solid #e0e0e0;border-radius:8px;">' % css_class
-        html += '<legend style="font-weight:600;font-size:13px;color:%s;padding:0 8px;">%s</legend>' % (legend_color, title)
-        html += items + "</fieldset>"
-        return html
-
-    email_label = email if email else "New user"
-    mode_label = "All available scopes" if mode == "all" else "Scopes requested by client"
-
-    read_scopes = [s for s in visible_scopes if s in settings.read_scopes or s in ("openid",)]
-    write_scopes = [s for s in visible_scopes if s not in read_scopes]
-
-    all_field_ids = "[" + ",".join('"' + _field_name(s) + '"' for s in visible_scopes) + "]"
-    existing_field_ids = "[" + ",".join('"' + _field_name(s) + '"' for s in existing if s in visible_scopes) + "]"
-
-    html_parts = [
-        '<!DOCTYPE html>',
-        '<html lang="en"><head><meta charset="utf-8">',
-        '<meta name="viewport" content="width=device-width,initial-scale=1">',
-        '<title>Google Workspace MCP - Scope Selection</title>',
-        '<style>',
-        'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:760px;margin:0 auto;padding:0 20px;background:#f0f2f5;color:#1a1a1a}',
-        '.container{background:#ffffff;padding:32px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.08);margin-top:20px}',
-        'h1{font-size:24px;font-weight:600;margin:0 0 6px}',
-        '.subtitle{font-size:13px;color:#666;margin-bottom:20px}',
-        '.user-row{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#f8f9fa;border-radius:8px;border:1px solid #e0e0e0;margin-bottom:18px}',
-        '.user-row .user{font-size:14px;color:#333;font-weight:500;margin:0}',
-        '.mode-badge{font-size:11px;background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:4px;font-weight:500}',
-        '.actions{display:flex;gap:10px;margin:16px 0}',
-        '.btn-sel,.btn-desel,.btn-reset{flex:1;padding:8px 14px;border:none;border-radius:6px;font-size:13px;cursor:pointer;font-weight:600;transition:background .15s}',
-        '.btn-sel{background:#e8f5e9;color:#2e7d32;border:1px solid #c8e6c9}',
-        '.btn-sel:hover{background:#e0f2e9}',
-        '.btn-desel{background:#fff3e0;color:#e65100;border:1px solid #ffcc80}',
-        '.btn-desel:hover{background:#ffe9da}',
-        '.btn-reset{background:#f0f0f0;color:#555;border:1px solid #d0d0d0}',
-        '.btn-reset:hover{background:#e8e8e8}',
-        'fieldset{margin:0 0 14px;border:1px solid #e0e0e0;border-radius:8px;padding:14px}',
-        'legend{font-weight:600;font-size:13px;color:#555;padding:0 8px}',
-        'button.submit{background:#0066cc;color:white;border:none;padding:12px 24px;border-radius:8px;font-size:14px;cursor:pointer;width:100%;font-weight:600;margin-top:18px}',
-        'button.submit:hover{background:#0052a3}',
-        'p.note{font-size:12px;color:#999;margin-top:12px}',
-        'label.scope-read{color:#2e7d37}',
-        'label.scope-read input[type=checkbox]{accent-color:#2e7d37}',
-        'label.scope-write{color:#e65100;font-weight:500}',
-        'label.scope-write input[type=checkbox]{accent-color:#e65100}',
-        'fieldset.group-scope-write{border-color:#ffcc80;background:#fffafa}',
-        '.divider{height:1px;background:#e0e0e0;margin:14px 0}',
-        '</style></head><body>',
-        '<div class="container">',
-        '<h1>Google Workspace MCP - Scope Selection</h1>',
-        '<div class="subtitle">Select which Google Workspace access you grant to this MCP server.</div>',
-        '<div class="user-row"><span class="user">Account: ' + email_label + '</span><span class="mode-badge">' + mode_label + '</span></div>',
-        '<div class="actions">',
-        '<button type="button" class="btn-sel" onclick="selectAll()">Select All</button>',
-        '<button type="button" class="btn-desel" onclick="deselectAll()">Deselect All</button>',
-        '<button type="button" class="btn-reset" onclick="resetToExisting()">Reset (existing only)</button>',
-        '</div>',
-        '<form id="scope-form" method="POST" action="/oauth/scale?rid=' + rid + '">',
-    ]
-    html_parts.append(_group("Read-only scopes", read_scopes, css_class="scope-read"))
-    html_parts.append('<div class="divider"></div>')
-    html_parts.append(_group("Write / Delete scopes (higher risk)", write_scopes, css_class="scope-write", is_write=True))
-    html_parts.extend([
-        '<button type="submit" class="submit">Authorize with Google</button>',
-        '<p class="note">Existing grants are pre-checked. New grants are added to your existing scopes.</p>',
-        '</form></div>',
-        '<script>',
-        'var allFields = ' + all_field_ids + ';',
-        'var existingFields = ' + existing_field_ids + ';',
-        'function selectAll(){',
-        '  allFields.forEach(function(id){',
-        '    var cb=document.querySelector(\'input[name="\'+id+\'"]\');',
-        '    if(cb)cb.checked=true;',
-        '  });',
-        '}',
-        'function deselectAll(){',
-        '  allFields.forEach(function(id){',
-        '    var cb=document.querySelector(\'input[name="\'+id+\'"]\');',
-        '    if(cb)cb.checked=false;',
-        '  });',
-        '}',
-        'function resetToExisting(){',
-        '  allFields.forEach(function(id){',
-        '    var cb=document.querySelector(\'input[name="\'+id+\'"]\');',
-        '    if(cb)cb.checked=existingFields.indexOf(id)>=0;',
-        '  });',
-        '}',
-        '</script>',
-        '</body></html>',
-    ])
-
-    return HTMLResponse("".join(html_parts))
 
 def _success_page_with_token(email: str, scopes: list[str], access_token: str) -> HTMLResponse:
     """Success page for manual OAuth flow — shows MCP bearer token."""

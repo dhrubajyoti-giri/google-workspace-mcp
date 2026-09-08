@@ -223,9 +223,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MCP_ALLOWED_HOSTS"),
     )
 
-    # ── Scope selector UI mode ──
-    # "all"       → show every available Google scope in the selector (user picks freely)
-    # "requested" → show only scopes requested by the MCP client (plus existing grants)
+    # ── Scope selection mode ──
+    # "all"       → send ALL AVAILABLE_SCOPES to Google's consent page
+    # "requested" → send only the scopes the MCP client requested to Google
+    # No scope selection form is shown — Google's consent page is the selector.
+    # The user accepts/denies scopes there.
     scope_selector_mode: str = Field(
         default="all",
         validation_alias=AliasChoices("SCOPE_SELECTOR_MODE"),
