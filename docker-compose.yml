@@ -5,9 +5,9 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:${MCP_PORT:-8000}:8000"
-    # All runtime config via env_file only (no environment: block)
-    env_file:
-      - .env
+    # Runtime config: set env vars via --env-file, docker-compose.override.yml,
+    # or your deployment platform. Required: EXTERNAL_URL, MCP_JWT_SECRET.
+    # See .env.example for all available variables.
     volumes:
       # ── Secrets: Google OAuth credentials + token registry ──
       # Host path: point SECRETS_VOLUME_PATH in .env at your secrets directory.
