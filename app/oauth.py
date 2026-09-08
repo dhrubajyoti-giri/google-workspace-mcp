@@ -179,16 +179,51 @@ def _exchange_code(code: str, state: str) -> tuple[dict[str, Any], Any]:
     try:
         token_response = flow.fetch_token(code=code)
     except (Exception, Warning) as e:
-        # oauthlib may raise a Warning when scopes change due to
-        # include_granted_scopes. The token is usually already in the session.
-        log.warning("flow.fetch_token raised %s: %s — attempting token recovery", type(e).__name__, e)
+        # oauthlib raises a Warning ("Scope has changed") when the token response
+        # contains scopes different from what the Flow was created with. This
+        # happens with include_granted_scopes=true (stale scopes from prior
+        # authorizations). Critically, oauthlib raises the Warning BEFORE
+        # assigning the token to sess.token, so sess.token is always falsy after.
+        log.warning("flow.fetch_token raised %s: %s — attempting manual token recovery",
+                     type(e).__name__, e)
         sess = flow.oauth2session
-        # Check truthiness (not just None) — sess.token may be {} (falsy)
-        if not hasattr(sess, "token") or not sess.token:
-            raise  # real error, re-raise
-        token_response = sess.token
+        if hasattr(sess, "token") and sess.token:
+            token_response = sess.token
+        else:
+            # Fallback: exchange the code manually via Google's token endpoint,
+            # bypassing oauthlib's scope validation entirely.
+            token_response = _manual_token_fetch(code, flow)
+            if not token_response:
+                raise  # recovery failed — re-raise original error
 
     return token_response, flow
+
+
+def _manual_token_fetch(code: str, flow: Any) -> dict[str, Any] | None:
+    """Exchange an authorization code via Google's token endpoint directly.
+
+    Used as a fallback when ``flow.fetch_token`` raises a Warning about scope
+    changes (oauthlib validates scopes before assigning the token). This
+    bypasses oauthlib's scope validation and returns the raw response.
+    """
+    import requests
+    client_config = flow.client_config.get("web", {})
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "code": code,
+        "client_id": client_config.get("client_id"),
+        "client_secret": client_config.get("client_secret"),
+        "redirect_uri": _get_redirect_uri(),
+        "grant_type": "authorization_code",
+    }
+    try:
+        resp = requests.post(token_url, data=data, timeout=30)
+        if resp.status_code == 200:
+            return resp.json()
+        log.error("Manual token fetch failed: %s %s", resp.status_code, resp.text)
+    except requests.RequestException as e:
+        log.error("Manual token fetch request error: %s", e)
+    return None
 
 
 def _safe_get_credentials(token_response: dict[str, Any], flow: Any) -> Any:
@@ -328,9 +363,14 @@ async def scope_submit(request: Request):
 
     session["selected_scopes"] = selected
 
-    # Redirect to Google with selected scopes (step: authorize)
+    # Redirect to Google with selected scopes (step: authorize).
+    # include_granted=False: do NOT use incremental authorization. Previously
+    # granted scopes (including stale ones from old code versions) would leak
+    # in via include_granted_scopes=true, causing oauthlib scope-mismatch
+    # warnings and "Scope has changed" errors. Starting fresh each time ensures
+    # the Google token contains EXACTLY the selected scopes.
     state = f"{rid}|authorize"
-    auth_url = _google_auth_url(scopes=selected, state=state)
+    auth_url = _google_auth_url(scopes=selected, state=state, include_granted=False)
     return RedirectResponse(url=auth_url, status_code=302)
 
 
