@@ -12,13 +12,16 @@ Exposes:
   GET  /oauth/scale                           — scope selection page (public)
   POST /oauth/scale                           — submit scopes (public)
   GET  /oauth/callback                        — Google OAuth callback (public)
-  POST /mcp/*                                 — MCP streamable HTTP (requires MCP bearer token)
+  POST /mcp/*                                 — MCP streamable HTTP (requires MCP bearer token,
+                                                EXCEPT server/discover which is pre-auth)
 
 Auth model:
   - MCP OAuth endpoints (/authorize, /token, /register, /revoke) and
     protected-resource metadata are served by the MCP SDK at the root level.
-  - /mcp/* is wrapped with RequireAuthMiddleware — returns 401 with
-    WWW-Authenticate (resource_metadata) if no valid MCP bearer token.
+  - /mcp/* is wrapped with MCPAuthMiddleware — returns 401 with
+    WWW-Authenticate (resource_metadata) if no valid MCP bearer token,
+    EXCEPT for server/discover POSTs which are allowed through pre-auth
+    (MCP 2026-07-28 spec: discover is a pre-authentication negotiation step).
   - AuthenticationMiddleware validates the bearer token and sets scope["user"].
   - AuthContextMiddleware sets a contextvar so MCP tools can call
     get_access_token().subject to identify the Google user.
@@ -41,8 +44,8 @@ from app.oauth_provider import provider, registry
 
 # ── MCP SDK auth components ────────────────────────────────────
 from mcp.server.auth.middleware.bearer_auth import (
+    AuthenticatedUser,
     BearerAuthBackend,
-    RequireAuthMiddleware,
 )
 from mcp.server.auth.middleware.auth_context import AuthContextMiddleware
 from mcp.server.auth.provider import ProviderTokenVerifier
@@ -195,6 +198,76 @@ class ServerDiscoverMiddleware:
         await self.app(scope, _receive, send)
 
 
+# ── MCP Auth Middleware (allows server/discover without bearer token) ──
+class MCPAuthMiddleware:
+    """Auth middleware for /mcp that allows ``server/discover`` without a bearer token.
+
+    The MCP 2026-07-28 spec defines ``server/discover`` as a pre-authentication
+    negotiation step — the client sends it *before* obtaining or presenting an
+    MCP bearer token. The SDK's ``RequireAuthMiddleware`` rejects all requests
+    without a valid bearer token (401), which causes the MCP client's
+    ``connect()`` → ``_negotiate()`` → ``server/discover`` to fail, leaving the
+    QwenPaw driver handler stuck in "inactive" state (503 on all subsequent
+    tool calls).
+
+    This middleware is a drop-in replacement for ``RequireAuthMiddleware`` that
+    additionally lets ``server/discover`` POSTs through when no authenticated
+    user is present. All other requests require a valid bearer token.
+    """
+
+    def __init__(self, app: Any, required_scopes: list[str], resource_metadata_url: Any | None = None):
+        self.app = app
+        self.required_scopes = required_scopes
+        self.resource_metadata_url = resource_metadata_url
+
+    def _is_discover(self, scope: dict) -> bool:
+        """Check if the request is a server/discover POST (identified by the mcp-method header)."""
+        if scope.get("type") != "http" or scope.get("method") != "POST":
+            return False
+        for raw_key, raw_value in scope.get("headers", []):
+            key = raw_key.decode("ascii", errors="replace").lower()
+            if key == "mcp-method":
+                return raw_value.decode("ascii", errors="replace") == "server/discover"
+        return False
+
+    async def _send_auth_error(self, send: Any, status_code: int, error: str, description: str) -> None:
+        www_auth_parts = [f'error="{error}"', f'error_description="{description}"']
+        if self.resource_metadata_url:
+            www_auth_parts.append(f'resource_metadata="{self.resource_metadata_url}"')
+        www_authenticate = f"Bearer {', '.join(www_auth_parts)}"
+        body = json.dumps({"error": error, "error_description": description}).encode()
+        await send({
+            "type": "http.response.start",
+            "status": status_code,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"www-authenticate", www_authenticate.encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        auth_user = scope.get("user")
+
+        # server/discover is a pre-auth negotiation step — allow without bearer token
+        if self._is_discover(scope) and not isinstance(auth_user, AuthenticatedUser):
+            await self.app(scope, receive, send)
+            return
+
+        if not isinstance(auth_user, AuthenticatedUser):
+            await self._send_auth_error(send, 401, "invalid_token", "Authentication required")
+            return
+
+        auth_credentials = scope.get("auth")
+        for required_scope in self.required_scopes:
+            if auth_credentials is None or required_scope not in auth_credentials.scopes:
+                await self._send_auth_error(send, 403, "insufficient_scope", f"Required scope: {required_scope}")
+                return
+
+        await self.app(scope, receive, send)
+
+
 # ── Lifespan ───────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -255,13 +328,14 @@ for route in _protected_routes:
 app.include_router(oauth_router)
 
 # ── MCP mount (protected — requires MCP bearer token) ────────
-# RequireAuthMiddleware checks scope["user"] (set by AuthenticationMiddleware).
-# If not authenticated → 401 with WWW-Authenticate (resource_metadata URL).
+# MCPAuthMiddleware checks scope["user"] (set by AuthenticationMiddleware).
+# Allows server/discover POSTs through without auth (pre-auth negotiation).
+# All other requests require a valid bearer token (401 if missing/invalid).
 mcp_asgi = create_mcp_asgi()
 mcp_asgi = ServerDiscoverMiddleware(mcp_asgi)  # handle QwenPaw's server/discover
-protected_mcp = RequireAuthMiddleware(
+protected_mcp = MCPAuthMiddleware(
     mcp_asgi,
-    required_scopes=[],  # no MCP-level scope requirements — see Point 3: token required only
+    required_scopes=[],  # no MCP-level scope requirements — token required only
     resource_metadata_url=_resource_metadata_url,
 )
 app.mount("/mcp", protected_mcp)

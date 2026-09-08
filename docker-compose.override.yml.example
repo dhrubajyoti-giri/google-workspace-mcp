@@ -1,0 +1,37 @@
+# ── Override file for runtime env vars (Docker, Caddy, etc.) ──
+# Copy this file to `docker-compose.override.yml` and edit the values.
+# Required: EXTERNAL_URL, MCP_JWT_SECRET, GOOGLE_CLIENT_SECRET_FILE
+# Optional: MCP_ALLOWED_HOSTS (set if MCP client connects via Docker network)
+#
+# Generate MCP_JWT_SECRET:
+#   openssl rand -hex 32
+
+services:
+  google-workspace-mcp:
+    environment:
+      # ── Required ──
+      # Your public HTTPS domain (must be accessible by MCP client & Google)
+      EXTERNAL_URL: "https://gws.mcp.dg.linkpic.net"
+
+      # Stable secret for signing MCP JWT tokens (use openssl rand -hex 32)
+      MCP_JWT_SECRET: "your-generated-secret-here"
+
+      # Path inside container to mounted client_secret.json
+      GOOGLE_CLIENT_SECRET_FILE: "/secrets/client_secret.json"
+
+      # ── Required: your Google API scopes ──
+      # Uncomment only the scopes you have enabled in your GCP project:
+      # AVAILABLE_SCOPES: "https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/calendar.readonly"
+
+      # ── Connection: MCP client → /mcp/ ──
+      # Set if MCP client connects via Docker network (e.g. gws-mcp:8000)
+      # not the public EXTERNAL_URL. Add your container/service hostname:
+      MCP_ALLOWED_HOSTS: "gws-mcp,gws-mcp:*"
+
+      # ── Optional ──
+      # SCOPE_SELECTOR_MODE: "all"        # all AVAILABLE_SCOPES sent to Google
+      # SCOPE_SELECTOR_MODE: "requested"   # only MCP-client-requested scopes
+      ENABLE_CHAT_SCOPES: "false"
+      MCP_PORT: "8000"
+      TZ: "Asia/Kolkata"
+      LOG_LEVEL: "INFO"
