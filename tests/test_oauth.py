@@ -84,50 +84,32 @@ def test_registry_roundtrip():
     assert registry.get(test_email) is None
 
 
-def test_build_token_data_handles_string_scope():
-    """_build_token_data should parse scope as a space-separated string."""
-    token_response = {
-        "access_token": "test_token",
-        "refresh_token": "test_refresh",
-        "scope": "openid email profile",
-    }
-    with patch("app.oauth._safe_get_credentials", return_value=None):
-        creds_data = _build_token_data(token_response, MagicMock())
-    assert creds_data["scopes"] == ["openid", "email", "profile"]
-    assert creds_data["token"] == "test_token"
-    assert creds_data["refresh_token"] == "test_refresh"
+def test_build_token_data_deduplicates_credentials():
+    """_build_token_data should NOT store client_id/client_secret per-user.
 
-
-def test_build_token_data_handles_list_scope():
-    """_build_token_data should handle scope as a list (from oauthlib's sess.token).
-
-    This is the exact scenario that caused the AttributeError: 'list' object
-    has no attribute 'split' crash in production.
+    These are fixed per-deployment (from client_secret.json) and loaded at
+    runtime by GoogleClient. Storing them per-user was redundant.
     """
     token_response = {
         "access_token": "test_token",
         "refresh_token": "test_refresh",
-        "scope": ["openid", "https://www.googleapis.com/auth/userinfo.email"],
-    }
-    with patch("app.oauth._safe_get_credentials", return_value=None):
-        creds_data = _build_token_data(token_response, MagicMock())
-    assert creds_data["scopes"] == ["openid", "https://www.googleapis.com/auth/userinfo.email"]
-
-
-def test_build_token_data_handles_missing_scope():
-    """_build_token_data should fall back to credentials scopes when scope is absent."""
-    token_response = {
-        "access_token": "test_token",
+        "scope": "openid email",
+        "id_token": "test_id_token",
     }
     mock_creds = MagicMock()
     mock_creds.token = "test_token"
-    mock_creds.refresh_token = None
+    mock_creds.refresh_token = "test_refresh"
     mock_creds.token_uri = "https://oauth2.googleapis.com/token"
-    mock_creds.client_id = "test"
-    mock_creds.client_secret = "test"
-    mock_creds.scopes = ["openid", "email"]
+    mock_creds.client_id = "test_client_id"
+    mock_creds.client_secret = "test_secret"
     mock_creds.expiry = None
 
     with patch("app.oauth._safe_get_credentials", return_value=mock_creds):
         creds_data = _build_token_data(token_response, MagicMock())
-    assert creds_data["scopes"] == ["openid", "email"]
+
+    # Only token-specific fields should be stored, no client creds or scopes
+    assert "client_id" not in creds_data
+    assert "client_secret" not in creds_data
+    assert "scopes" not in creds_data
+    assert creds_data["token"] == "test_token"
+    assert creds_data["refresh_token"] == "test_refresh"
