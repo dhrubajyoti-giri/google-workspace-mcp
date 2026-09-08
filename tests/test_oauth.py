@@ -2,7 +2,7 @@
 import time
 from unittest.mock import patch, MagicMock
 
-from app.oauth import _google_state_store, _cleanup_stores, _exchange_code
+from app.oauth import _google_state_store, _cleanup_stores, _exchange_code, _build_token_data
 from app.oauth_provider import provider, registry
 
 
@@ -82,3 +82,52 @@ def test_registry_roundtrip():
 
     registry.delete(test_email)
     assert registry.get(test_email) is None
+
+
+def test_build_token_data_handles_string_scope():
+    """_build_token_data should parse scope as a space-separated string."""
+    token_response = {
+        "access_token": "test_token",
+        "refresh_token": "test_refresh",
+        "scope": "openid email profile",
+    }
+    with patch("app.oauth._safe_get_credentials", return_value=None):
+        creds_data = _build_token_data(token_response, MagicMock())
+    assert creds_data["scopes"] == ["openid", "email", "profile"]
+    assert creds_data["token"] == "test_token"
+    assert creds_data["refresh_token"] == "test_refresh"
+
+
+def test_build_token_data_handles_list_scope():
+    """_build_token_data should handle scope as a list (from oauthlib's sess.token).
+
+    This is the exact scenario that caused the AttributeError: 'list' object
+    has no attribute 'split' crash in production.
+    """
+    token_response = {
+        "access_token": "test_token",
+        "refresh_token": "test_refresh",
+        "scope": ["openid", "https://www.googleapis.com/auth/userinfo.email"],
+    }
+    with patch("app.oauth._safe_get_credentials", return_value=None):
+        creds_data = _build_token_data(token_response, MagicMock())
+    assert creds_data["scopes"] == ["openid", "https://www.googleapis.com/auth/userinfo.email"]
+
+
+def test_build_token_data_handles_missing_scope():
+    """_build_token_data should fall back to credentials scopes when scope is absent."""
+    token_response = {
+        "access_token": "test_token",
+    }
+    mock_creds = MagicMock()
+    mock_creds.token = "test_token"
+    mock_creds.refresh_token = None
+    mock_creds.token_uri = "https://oauth2.googleapis.com/token"
+    mock_creds.client_id = "test"
+    mock_creds.client_secret = "test"
+    mock_creds.scopes = ["openid", "email"]
+    mock_creds.expiry = None
+
+    with patch("app.oauth._safe_get_credentials", return_value=mock_creds):
+        creds_data = _build_token_data(token_response, MagicMock())
+    assert creds_data["scopes"] == ["openid", "email"]

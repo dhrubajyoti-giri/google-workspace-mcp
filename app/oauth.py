@@ -279,11 +279,13 @@ def _extract_email(token_response: dict[str, Any], flow: Any) -> str | None:
 def _build_token_data(token_response: dict[str, Any], flow: Any) -> dict[str, Any]:
     """Build a Google Credentials-compatible dict for registry storage."""
     creds = _safe_get_credentials(token_response, flow)
-    # Use scopes from the token response (reflects what Google actually granted,
-    # including previously granted scopes via include_granted_scopes=true)
-    scope_str = token_response.get("scope", "")
-    if scope_str:
-        scopes = scope_str.split()
+    # Scope can be a space-separated string (from manual Google API fetch)
+    # or a list (from oauthlib's flow.fetch_token which parses it).
+    scope_val = token_response.get("scope")
+    if isinstance(scope_val, list):
+        scopes = scope_val
+    elif isinstance(scope_val, str) and scope_val:
+        scopes = scope_val.split()
     elif creds and creds.scopes:
         scopes = list(creds.scopes)
     else:
