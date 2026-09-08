@@ -303,9 +303,10 @@ def _build_token_data(token_response: dict[str, Any], flow: Any) -> dict[str, An
 def scope_selector(request: Request):
     """Entry point from /authorize (via provider).
 
-    Single-step auth: determine which scopes to send to Google based on
-    SCOPE_SELECTOR_MODE, then redirect to Google in ONE redirect.
-    No scope selection form -- Google's consent page is the selector.
+    - skip: redirect directly to Google with default scopes (no chooser)
+    - all/requested: render scope selection form. Google consent cannot
+      deselect previously-granted scopes, so bridge shows chooser first.
+      No pre-checking -- user selects from scratch each time.
     """
     rid = request.query_params.get("rid")
     if not rid:
@@ -313,32 +314,54 @@ def scope_selector(request: Request):
 
     _cleanup_stores()
 
-    auth_req = provider._auth_requests.get(rid)
+    mode = settings.scope_selector_mode
+    if mode == "skip":
+        scopes = list(settings.default_scopes)
+        for s in ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"):
+            if s not in scopes:
+                scopes.append(s)
+        state = f"{rid}|auth"
+        auth_url = _google_auth_url(scopes=scopes, state=state, access_type="offline", include_granted=False)
+        return RedirectResponse(url=auth_url, status_code=302)
+
+    auth_req = provider._auth_requests.get(rid) if provider and hasattr(provider, "_auth_requests") else None
     client_scopes = auth_req["scopes"] if auth_req else []
 
-    mode = settings.scope_selector_mode
     if mode == "requested":
-        # Only send scopes the MCP client explicitly requested
-        api_scopes = list(client_scopes) if client_scopes else list(settings.all_scopes)
+        visible = [s for s in settings.all_scopes if s in client_scopes] or list(settings.all_scopes)
     else:
-        # "all" (default) -- send all available scopes
-        api_scopes = list(settings.all_scopes)
+        visible = list(settings.all_scopes)
 
-    # Always include identity scopes
+    identity_scopes = ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile")
+    visible = [s for s in visible if s not in identity_scopes]
+
+    return _render_scope_form(rid, visible, request)
+
+
+@router.post("/scale", response_class=HTMLResponse)
+async def scope_submit(request: Request):
+    """Process scope selection -> redirect to Google with selected scopes."""
+    rid = request.query_params.get("rid")
+    if not rid:
+        return _error_page("Missing request ID")
+
+    _cleanup_stores()
+    form = await request.form()
+    selected = []
+    for scope in settings.all_scopes:
+        field_name = "scope_" + scope.replace("://", "_").replace("/", "_").replace(".", "_")
+        if form.get(field_name):
+            selected.append(scope)
+
+    if not selected:
+        return _error_page("Please select at least one scope.")
+
     for s in ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"):
-        if s not in api_scopes:
-            api_scopes.append(s)
+        if s not in selected:
+            selected.append(s)
 
-    # Single redirect to Google with all scopes at once.
-    # include_granted=False ensures Google returns EXACTLY these scopes
-    # (no stale scopes from prior authorizations).
     state = f"{rid}|auth"
-    auth_url = _google_auth_url(
-        scopes=api_scopes,
-        state=state,
-        access_type="offline",
-        include_granted=False,
-    )
+    auth_url = _google_auth_url(scopes=selected, state=state, access_type="offline", include_granted=False)
     return RedirectResponse(url=auth_url, status_code=302)
 
 
@@ -439,6 +462,73 @@ def _error_page(message: str) -> HTMLResponse:
         status_code=400,
     )
 
+
+def _render_scope_form(rid, visible_scopes, request):
+    """Render scope selection form (no pre-checking). Google cannot deselect
+    previously-granted scopes, so the bridge lets users choose here first."""
+    labels = settings.scope_labels
+    read_set = set(settings.read_scopes)
+
+    rows = []
+    for scope in visible_scopes:
+        label = labels.get(scope, scope.replace("https://www.googleapis.com/auth/", ""))
+        is_readonly = scope in read_set or "readonly" in scope
+        if is_readonly:
+            risk = "color:#2e7d32"
+        else:
+            risk = "color:#c62828;font-weight:bold"
+        field_name = "scope_" + scope.replace("://", "_").replace("/", "_").replace(".", "_")
+        rows.append(
+            '<label style="display:flex;align-items:center;padding:6px 0;border-bottom:1px solid #eee">'
+            '<input type="checkbox" name="' + field_name + '" value="1" style="margin-right:10px;width:16px;height:16px">'
+            '<span style="' + risk + '">' + label + '</span></label>'
+        )
+
+    rows_html = "\n".join(rows)
+    total = len(visible_scopes)
+    read_count = sum(1 for s in visible_scopes if s in read_set or "readonly" in s)
+    write_count = total - read_count
+
+    html = (
+        '<!DOCTYPE html>\n'
+        '<html><head><title>Google Workspace MCP - Scope Selection</title>\n'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">\n'
+        '<style>\n'
+        '  body{font-family:-apple-system,sans-serif;max-width:700px;margin:30px auto;padding:0 20px;background:#fafafa}\n'
+        '  h1{color:#1a237e;font-size:22px}\n'
+        '  .subtitle{color:#666;font-size:13px;margin-bottom:20px}\n'
+        '  .info{background:#e3f2fd;padding:12px 16px;border-radius:8px;margin-bottom:20px;font-size:13px}\n'
+        '  .scopes{background:white;border:1px solid #e0e0e0;border-radius:8px;padding:16px;max-height:400px;overflow-y:auto}\n'
+        '  .actions{margin:20px 0;text-align:center}\n'
+        '  button{background:#0066cc;color:white;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:13px;margin:0 5px}\n'
+        '  button:hover{background:#0052a3}\n'
+        '  .summary{font-size:12px;color:#888;margin-top:15px}\n'
+        '  input[type="checkbox"]{width:16px;height:16px;cursor:pointer}\n'
+        '</style></head><body>\n'
+        '<h1>Google Workspace MCP</h1>\n'
+        '<p class="subtitle">Select which Google API scopes to authorize.</p>\n'
+        '<div class="info">\n'
+        '  Google does not let you deselect previously granted scopes on its consent page.<br>\n'
+        '  That is why the bridge shows this selector first. Select exactly what you need,<br>\n'
+        '  then Google will show its consent screen for only those scopes.\n'
+        '</div>\n'
+        '<form method="POST" action="/oauth/scale?rid=' + rid + '">\n'
+        '  <div class="scopes">' + rows_html + '</div>\n'
+        '  <div class="actions">\n'
+        '    <button type="button" onclick="selectAll(true)">Select All</button>\n'
+        '    <button type="button" onclick="selectAll(false)">Deselect All</button>\n'
+        '    <button type="submit" style="background:#2e7d32">Authorize with Google</button>\n'
+        '  </div>\n'
+        '  <p class="summary">' + str(read_count) + ' read-only, ' + str(write_count) + ' read+write scopes</p>\n'
+        '</form>\n'
+        '<script>\n'
+        "  function selectAll(checked) {\n"
+        "    document.querySelectorAll('input[type=\"checkbox\"]').forEach(function(cb) { cb.checked = checked; });\n"
+        '  }\n'
+        '</script>\n'
+        '</body></html>'
+    )
+    return HTMLResponse(html)
 
 
 def _success_page_with_token(email: str, scopes: list[str], access_token: str) -> HTMLResponse:
