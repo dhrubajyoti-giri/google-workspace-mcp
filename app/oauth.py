@@ -81,27 +81,41 @@ def _get_flow(scopes: list[str]) -> Any:
     return flow
 
 
-def _google_auth_url(scopes: list[str], state: str, access_type: str = "offline") -> str:
+def _google_auth_url(
+    scopes: list[str],
+    state: str,
+    access_type: str = "offline",
+    include_granted: bool = True,
+) -> str:
     """Build a Google OAuth authorization URL and store the flow for later exchange.
 
     Args:
         scopes: Google API scopes to request
         state: Google OAuth state parameter (carries our internal {rid}|{step})
         access_type: "offline" (get refresh token) or "online" (no refresh token)
+        include_granted: if True, include previously granted scopes (incremental
+                         authorization). Set False for the identify step so Google
+                         shows only the minimal consent screen.
 
     Returns:
         Google authorization URL (browser should redirect user here)
     """
     _cleanup_stores()
     flow = _get_flow(scopes)
-    auth_url, _ = flow.authorization_url(
-        access_type=access_type,
-        prompt="consent",                  # always show consent screen (ensures refresh token)
-        include_granted_scopes="true",     # include previously granted scopes (incremental addition)
-        state=state,
-        # Note: include_granted_scopes may cause oauthlib to emit a
-        # "Scope has changed" Warning. _exchange_code() catches it.
-    )
+
+    auth_kwargs = {
+        "access_type": access_type,
+        "prompt": "consent",  # always show consent screen (ensures refresh token)
+        "state": state,
+    }
+    # Only include include_granted_scopes when incremental authorization is needed.
+    # For the identify step (include_granted=False), omit it entirely so Google
+    # shows a minimal consent screen (openid + email only), not all previously
+    # granted scopes.
+    if include_granted:
+        auth_kwargs["include_granted_scopes"] = "true"
+
+    auth_url, _ = flow.authorization_url(**auth_kwargs)
     # Store the flow keyed by the Google OAuth state string
     _google_state_store[state] = {
         "flow": flow,
@@ -274,6 +288,7 @@ def scope_selector(request: Request):
             scopes=["openid", "https://www.googleapis.com/auth/userinfo.email"],
             state=state,
             access_type="online",  # no refresh token needed in identify step
+            include_granted=False,  # minimal consent screen — no previously granted scopes
         )
         return RedirectResponse(url=auth_url, status_code=302)
 
