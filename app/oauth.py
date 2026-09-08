@@ -404,12 +404,14 @@ def callback(request: Request):
         if not email:
             return _error_page("Could not determine user email.")
 
-        # Use scopes actually granted by Google (includes previously granted
-        # via include_granted_scopes=true, plus the newly selected ones)
-        scope_str = token_response.get("scope", "")
-        granted_scopes = scope_str.split() if scope_str else session.get("selected_scopes", settings.default_scopes)
-        if not granted_scopes:
-            granted_scopes = settings.default_scopes
+        # Use ONLY the user-selected scopes for the MCP token and registry.
+        # The Google token (in creds_data) still has all granted scopes
+        # (including stale ones from previous authorizations via
+        # include_granted_scopes=true), but the MCP token and scope chooser
+        # should only track what the user explicitly selected. This prevents
+        # stale scopes (e.g. gmail.drafts from an old code version) from
+        # leaking into the MCP token and causing "scope has changed" errors.
+        granted_scopes = session.get("selected_scopes") or settings.default_scopes
 
         # Store in registry (keyed by Google email)
         creds_data = _build_token_data(token_response, flow)
