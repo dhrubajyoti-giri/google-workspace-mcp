@@ -460,22 +460,10 @@ def _error_page(message: str) -> HTMLResponse:
 
 
 def _render_scope_form(rid: str, email: str, existing: list[str], client_scopes: list[str], mode: str, request: Request) -> HTMLResponse:
-    """Render the scope selection HTML form.
-
-    **mode** controls which scopes are shown:
-      - "all"       → show every available Google scope (default)
-      - "requested" → show only scopes the MCP client requested
-
-    In both modes the user's existing grants are pre-selected so that
-    re-auth *adds* rather than *replaces*.
-
-    Read-only and write/delete scopes are visually separated so that
-    higher-risk scopes are clearly flagged.
-    """
+    """Render the scope selection HTML form with Select All / Deselect All / Reset."""
     labels = settings.scope_labels
     all_scopes = settings.all_scopes
 
-    # ── Determine which scopes to show in the selector ──
     if mode == "requested":
         visible_scopes = [s for s in all_scopes if s in client_scopes]
     else:
@@ -483,72 +471,115 @@ def _render_scope_form(rid: str, email: str, existing: list[str], client_scopes:
 
     labels_map = settings.scope_labels
 
-    def _field_name(scope: str) -> str:
+    def _field_name(scope):
         return "scope_" + scope.replace("://", "_").replace("/", "_")
 
-    def _checkbox(scope: str, checked: bool = False, css_class: str = "scope-read") -> str:
+    def _checkbox(scope, checked=False, css_class="scope-read"):
         field = _field_name(scope)
         label = labels_map.get(scope, scope)
         display = label if len(label) < 60 else label[:57] + "..."
         checked_attr = "checked" if checked else ""
-        return (
-            f'<label class="{css_class}" style="display:flex;align-items:center;gap:6px;'
-            f'padding:4px 0;font-size:13px;">'
-            f'<input type="checkbox" name="{field}" value="1" {checked_attr}>'
-            f' {display}</label>'
-        )
+        html = '<label class="%s" style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:13px;cursor:pointer;">' % css_class
+        html += '<input type="checkbox" name="%s" value="1" %s> %s</label>' % (field, checked_attr, display)
+        return html
 
-    def _group(title: str, scopes: list[str], css_class: str = "scope-read") -> str:
+    def _group(title, scopes, css_class="scope-read", is_write=False):
         if not scopes:
             return ""
         items = "".join(_checkbox(s, checked=s in existing, css_class=css_class) for s in scopes)
-        return (
-            f'<fieldset class="{css_class}" style="margin:12px 0;padding:12px;border:1px solid #e0e0e0;border-radius:6px;">'
-            f'<legend style="font-weight:600;font-size:13px;color:#555;padding:0 6px;">{title}</legend>'
-            f'{items}</fieldset>'
-        )
+        legend_color = "#e65100" if is_write else "#555"
+        html = '<fieldset class="group-%s" style="margin:14px 0;padding:14px;border:1px solid #e0e0e0;border-radius:8px;">' % css_class
+        html += '<legend style="font-weight:600;font-size:13px;color:%s;padding:0 8px;">%s</legend>' % (legend_color, title)
+        html += items + "</fieldset>"
+        return html
 
     email_label = email if email else "New user"
     mode_label = "All available scopes" if mode == "all" else "Scopes requested by client"
 
-    # Split visible scopes into read-only and write/delete
-    read_scopes = [s for s in visible_scopes if s in settings._read_scopes or s in ("openid",)]
+    read_scopes = [s for s in visible_scopes if s in settings.read_scopes or s in ("openid",)]
     write_scopes = [s for s in visible_scopes if s not in read_scopes]
 
-    return HTMLResponse(f"""<!DOCTYPE html>
-<html><head><title>Select Scopes</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-  body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:700px;margin:30px auto;padding:0 20px;background:#f9f9f9}}
-  .container{{background:white;padding:25px;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
-  h1{{font-size:22px;color:#1a1a1a}}
-  .user{{font-size:14px;color:#666;margin:10px 0 20px;font-weight:500}}
-  .mode-badge{{font-size:11px;background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:4px;display:inline-block}}
-  fieldset{{margin:12px 0;border:1px solid #e0e0e0;border-radius:6px;padding:12px}}
-  legend{{font-weight:600;font-size:13px;color:#555;padding:0 6px}}
-  button{{background:#0066cc;color:white;border:none;padding:12px 24px;border-radius:6px;
-          font-size:14px;cursor:pointer;width:100%;font-weight:600;margin-top:10px}}
-  button:hover{{background:#0052a3}}
-  p.note{{font-size:12px;color:#999;margin-top:15px}}
-  label.scope-read{{color:#2e7d37}}
-  label.scope-read input[type=checkbox]{{accent-color:#2e7d37}}
-  label.scope-write{{color:#e65100;font-weight:500}}
-  label.scope-write input[type=checkbox]{{accent-color:#e65100}}
-  fieldset.scope-write{{border-color:#ffcc80;background:#fff3e0}}
-</style></head><body>
-<div class="container">
-  <h1>Google Workspace MCP — Scope Selection</h1>
-  <p class="user">Account: {email_label}</p>
-  <p><span class="mode-badge">{mode_label}</span></p>
-  <form method="POST" action="/oauth/scale?rid={rid}">
-    <p style="font-size:13px;color:#666;">Select which Google Workspace access you grant to this MCP server.</p>
-    {_group("Read-only scopes", read_scopes, css_class="scope-read")}
-    {_group("Write / Delete scopes (higher risk)", write_scopes, css_class="scope-write")}
-    <button type="submit">Authorize with Google</button>
-    <p class="note">Existing grants are pre-checked. New grants are added to your existing scopes.</p>
-  </form>
-</div>
-</body></html>""")
+    all_field_ids = "[" + ",".join('"' + _field_name(s) + '"' for s in visible_scopes) + "]"
+    existing_field_ids = "[" + ",".join('"' + _field_name(s) + '"' for s in existing if s in visible_scopes) + "]"
+
+    html_parts = [
+        '<!DOCTYPE html>',
+        '<html lang="en"><head><meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width,initial-scale=1">',
+        '<title>Google Workspace MCP - Scope Selection</title>',
+        '<style>',
+        'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:760px;margin:0 auto;padding:0 20px;background:#f0f2f5;color:#1a1a1a}',
+        '.container{background:#ffffff;padding:32px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.08);margin-top:20px}',
+        'h1{font-size:24px;font-weight:600;margin:0 0 6px}',
+        '.subtitle{font-size:13px;color:#666;margin-bottom:20px}',
+        '.user-row{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#f8f9fa;border-radius:8px;border:1px solid #e0e0e0;margin-bottom:18px}',
+        '.user-row .user{font-size:14px;color:#333;font-weight:500;margin:0}',
+        '.mode-badge{font-size:11px;background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:4px;font-weight:500}',
+        '.actions{display:flex;gap:10px;margin:16px 0}',
+        '.btn-sel,.btn-desel,.btn-reset{flex:1;padding:8px 14px;border:none;border-radius:6px;font-size:13px;cursor:pointer;font-weight:600;transition:background .15s}',
+        '.btn-sel{background:#e8f5e9;color:#2e7d32;border:1px solid #c8e6c9}',
+        '.btn-sel:hover{background:#e0f2e9}',
+        '.btn-desel{background:#fff3e0;color:#e65100;border:1px solid #ffcc80}',
+        '.btn-desel:hover{background:#ffe9da}',
+        '.btn-reset{background:#f0f0f0;color:#555;border:1px solid #d0d0d0}',
+        '.btn-reset:hover{background:#e8e8e8}',
+        'fieldset{margin:0 0 14px;border:1px solid #e0e0e0;border-radius:8px;padding:14px}',
+        'legend{font-weight:600;font-size:13px;color:#555;padding:0 8px}',
+        'button.submit{background:#0066cc;color:white;border:none;padding:12px 24px;border-radius:8px;font-size:14px;cursor:pointer;width:100%;font-weight:600;margin-top:18px}',
+        'button.submit:hover{background:#0052a3}',
+        'p.note{font-size:12px;color:#999;margin-top:12px}',
+        'label.scope-read{color:#2e7d37}',
+        'label.scope-read input[type=checkbox]{accent-color:#2e7d37}',
+        'label.scope-write{color:#e65100;font-weight:500}',
+        'label.scope-write input[type=checkbox]{accent-color:#e65100}',
+        'fieldset.group-scope-write{border-color:#ffcc80;background:#fffafa}',
+        '.divider{height:1px;background:#e0e0e0;margin:14px 0}',
+        '</style></head><body>',
+        '<div class="container">',
+        '<h1>Google Workspace MCP - Scope Selection</h1>',
+        '<div class="subtitle">Select which Google Workspace access you grant to this MCP server.</div>',
+        '<div class="user-row"><span class="user">Account: ' + email_label + '</span><span class="mode-badge">' + mode_label + '</span></div>',
+        '<div class="actions">',
+        '<button type="button" class="btn-sel" onclick="selectAll()">Select All</button>',
+        '<button type="button" class="btn-desel" onclick="deselectAll()">Deselect All</button>',
+        '<button type="button" class="btn-reset" onclick="resetToExisting()">Reset (existing only)</button>',
+        '</div>',
+        '<form id="scope-form" method="POST" action="/oauth/scale?rid=' + rid + '">',
+    ]
+    html_parts.append(_group("Read-only scopes", read_scopes, css_class="scope-read"))
+    html_parts.append('<div class="divider"></div>')
+    html_parts.append(_group("Write / Delete scopes (higher risk)", write_scopes, css_class="scope-write", is_write=True))
+    html_parts.extend([
+        '<button type="submit" class="submit">Authorize with Google</button>',
+        '<p class="note">Existing grants are pre-checked. New grants are added to your existing scopes.</p>',
+        '</form></div>',
+        '<script>',
+        'var allFields = ' + all_field_ids + ';',
+        'var existingFields = ' + existing_field_ids + ';',
+        'function selectAll(){',
+        '  allFields.forEach(function(id){',
+        '    var cb=document.querySelector(\'input[name="\'+id+\'"]\');',
+        '    if(cb)cb.checked=true;',
+        '  });',
+        '}',
+        'function deselectAll(){',
+        '  allFields.forEach(function(id){',
+        '    var cb=document.querySelector(\'input[name="\'+id+\'"]\');',
+        '    if(cb)cb.checked=false;',
+        '  });',
+        '}',
+        'function resetToExisting(){',
+        '  allFields.forEach(function(id){',
+        '    var cb=document.querySelector(\'input[name="\'+id+\'"]\');',
+        '    if(cb)cb.checked=existingFields.indexOf(id)>=0;',
+        '  });',
+        '}',
+        '</script>',
+        '</body></html>',
+    ])
+
+    return HTMLResponse("".join(html_parts))
+
 def _success_page_with_token(email: str, scopes: list[str], access_token: str) -> HTMLResponse:
     """Success page for manual OAuth flow — shows MCP bearer token."""
     import urllib.parse

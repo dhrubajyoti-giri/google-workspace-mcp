@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     )
 
     # ── Google API scopes ──
+    # These are the DEFAULT fallback lists. In production, configure scopes
+    # via env vars:
+    #   AVAILABLE_SCOPES  — comma-separated list of all scopes to show in selector
+    #   READONLY_SCOPES   — comma-separated subset marked as read-only (green in UI)
+    #   GOOGLE_SCOPES     — comma-separated default scopes if MCP client specifies none
     _read_scopes: list[str] = [
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
@@ -73,29 +78,65 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/presentations",
         "https://www.googleapis.com/auth/contacts",
         "https://www.googleapis.com/auth/tasks",
-        "https://www.googleapis.com/auth/chat.bot",
+    ]
+
+    # Chat scopes — enable with ENABLE_CHAT_SCOPES=true
+    _chat_scopes: list[str] = [
         "https://www.googleapis.com/auth/chat.messages",
         "https://www.googleapis.com/auth/chat.spaces",
     ]
 
-    # Scopes from GOOGLE_SCOPES env var (overrides default_scopes if set)
-    google_scopes_raw: str = Field(
+    # ── Env-var-driven scope configuration ──
+    # AVAILABLE_SCOPES: all scopes to show in the scope selector (comma-separated)
+    #   If not set, falls back to _read_scopes + _write_scopes (+ chat if enabled)
+    available_scopes_raw: str = Field(
         default="",
-        validation_alias=AliasChoices("GOOGLE_SCOPES", "GOOGLE_SCOPES_RAW"),
+        validation_alias=AliasChoices("AVAILABLE_SCOPES"),
+    )
+    # READONLY_SCOPES: subset of AVAILABLE_SCOPES that are read-only (green UI)
+    #   If not set, falls back to _read_scopes
+    readonly_scopes_raw: str = Field(
+        default="",
+        validation_alias=AliasChoices("READONLY_SCOPES"),
+    )
+    # Enable Chat API scopes (requires Chat API enabled in GCP console)
+    enable_chat_scopes: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("ENABLE_CHAT_SCOPES"),
     )
 
     @property
     def all_scopes(self) -> list[str]:
-        """All available Google API scopes (read + write + openid) for scope selector."""
-        return (
-            self._read_scopes
-            + self._write_scopes
-            + [
-                "openid",
-                "https://www.googleapis.com/auth/userinfo.email",
-                "https://www.googleapis.com/auth/userinfo.profile",
-            ]
-        )
+        """All available Google API scopes shown in the scope selector.
+
+        Order:
+        1. AVAILABLE_SCOPES env var (if set — user's custom list)
+        2. _read_scopes + _write_scopes + optional _chat_scopes (default fallback)
+        """
+        env_scopes = _parse_scopes(self.available_scopes_raw)
+        if env_scopes:
+            # Add identity scopes that are always needed
+            for s in ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"):
+                if s not in env_scopes:
+                    env_scopes.append(s)
+            return env_scopes
+        scopes = self._read_scopes + self._write_scopes
+        if self.enable_chat_scopes:
+            scopes += self._chat_scopes
+        scopes += [
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+        ]
+        return scopes
+
+    @property
+    def read_scopes(self) -> list[str]:
+        """Scopes marked as read-only (for UI coloring)."""
+        env_read = _parse_scopes(self.readonly_scopes_raw)
+        if env_read:
+            return env_read
+        return self._read_scopes
 
     @property
     def default_scopes(self) -> list[str]:
@@ -147,7 +188,6 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/contacts": "Contacts — Full access",
         "https://www.googleapis.com/auth/tasks.readonly": "Tasks — Read only",
         "https://www.googleapis.com/auth/tasks": "Tasks — Full access",
-        "https://www.googleapis.com/auth/chat.bot": "Chat — Bot",
         "https://www.googleapis.com/auth/chat.messages": "Chat — Messages",
         "https://www.googleapis.com/auth/chat.spaces": "Chat — Spaces",
     }
