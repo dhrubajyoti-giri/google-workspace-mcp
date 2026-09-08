@@ -47,15 +47,9 @@ except Exception:
 # when FastAPI mounts it at "/mcp", the full path becomes /mcp (not /mcp/mcp).
 _domain = urlparse(settings.external_url).hostname or "localhost"
 
-# Additional hosts for DNS rebinding protection: Docker service names, env var,
-# and defaults so the MCP client can connect via internal container hostnames.
-_extra_hosts: list[str] = []
-_env_hosts = [h.strip() for h in settings.allowed_hosts_raw.split(",") if h.strip()]
-_extra_hosts += _env_hosts
-_default_extra = ["gws-mcp", "gws-mcp:*", "google-workspace-mcp", "google-workspace-mcp:*"]
-for h in _default_extra:
-    if h not in _extra_hosts:
-        _extra_hosts.append(h)
+# DNS rebinding protection: extra allowed hosts come from MCP_ALLOWED_HOSTS env var only.
+# No hardcoded Docker hostnames — user configures via env var.
+_extra_hosts: list[str] = [h.strip() for h in settings.allowed_hosts_raw.split(",") if h.strip()]
 
 mcp = FastMCP(
     name=settings.mcp_server_name,
