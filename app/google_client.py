@@ -51,19 +51,26 @@ class GoogleClient:
         if self._creds and self._creds.valid:
             return self._creds
 
+        # client_id/client_secret are fixed (from client_secret.json) and not
+        # stored per-user. Load from token_data (legacy) or from the file.
+        client_id = self._token_data.get("client_id")
+        client_secret = self._token_data.get("client_secret")
+        if not client_id or not client_secret:
+            client_id, client_secret = _load_client_creds_from_file()
+
         self._creds = Credentials(
             token=self._token_data.get("token"),
             refresh_token=self._token_data.get("refresh_token"),
             token_uri=self._token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
-            client_id=self._token_data.get("client_id"),
-            client_secret=self._token_data.get("client_secret"),
+            client_id=client_id,
+            client_secret=client_secret,
             scopes=self._scopes,
         )
 
         if self._creds.expired:
             log.info("Refreshing expired Google access token for %s", self._email)
             self._creds.refresh(GoogleRequest())
-            # Persist updated token back to registry
+            # Persist updated token back to registry (only token fields, not client creds)
             _persist_updated_token(self._email, self._creds)
 
         return self._creds
@@ -95,16 +102,38 @@ class GoogleClient:
 _registry = Registry(settings.registry_file)
 
 
+def _load_client_creds_from_file() -> tuple[str | None, str | None]:
+    """Load client_id and client_secret from client_secret.json.
+
+    These are fixed per-deployment (not per-user), so we read them from the
+    Google OAuth credentials file at runtime instead of storing them in the
+    registry per user.
+    """
+    try:
+        import json
+        from pathlib import Path
+        path = Path(settings.google_client_secret_file)
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            conf = data.get("web") or data.get("installed") or data
+            return conf.get("client_id"), conf.get("client_secret")
+    except Exception:
+        pass
+    return None, None
+
+
 def _persist_updated_token(email: str, creds: Credentials) -> None:
-    """Write refreshed credentials back to the registry."""
+    """Write refreshed credentials back to the registry.
+
+    Only stores token-specific fields (token, refresh_token, expiry).
+    client_id/client_secret are NOT stored per-user (loaded from file).
+    scopes are NOT stored in token_data (registry top-level scopes is authoritative).
+    """
     _registry.save(email, {
         "token": creds.token,
         "refresh_token": creds.refresh_token,
         "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
         "expiry": creds.expiry.isoformat() if creds.expiry else None,
-        "scopes": list(creds.scopes) if creds.scopes else [],
     }, _registry.get_scopes(email) or settings.default_scopes)
 
 

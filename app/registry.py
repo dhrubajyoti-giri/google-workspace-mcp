@@ -6,16 +6,26 @@ gets its own entry keyed by the user's email address:
 ```json
 {
   "users": {
-    "alice@gmail.com": {
+    "alice@example.com": {
       "user_id": "alice",
-      "token": {...},          // Google Credentials.to_json()
-      "scopes": ["gmail.readonly", "drive.readonly"],
+      "token": {
+        "token": "ya29...",           // Google access token
+        "refresh_token": "1//...",    // Google refresh token
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "expiry": "2024-06-01T12:00:00+00:00"
+      },
+      "scopes": ["gmail.readonly", "drive.readonly"],  // user-selected scopes
       "authorized_at": "2024-06-01T12:00:00Z",
       "refreshed_at": "2024-06-01T12:00:00Z"
     }
   }
 }
 ```
+
+Note: ``client_id`` and ``client_secret`` are NOT stored per-user — they
+are fixed per-deployment (from ``client_secret.json``) and loaded at
+runtime by ``GoogleClient``.  ``scopes`` is stored once per user (the
+user-selected scopes), not duplicated in ``token``.
 """
 from __future__ import annotations
 

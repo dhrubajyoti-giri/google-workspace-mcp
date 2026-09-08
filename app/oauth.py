@@ -277,27 +277,20 @@ def _extract_email(token_response: dict[str, Any], flow: Any) -> str | None:
 
 
 def _build_token_data(token_response: dict[str, Any], flow: Any) -> dict[str, Any]:
-    """Build a Google Credentials-compatible dict for registry storage."""
+    """Build a Google Credentials-compatible dict for registry storage.
+
+    Only stores token-specific fields per user.  ``client_id`` and
+    ``client_secret`` are fixed (from ``client_secret.json``) and loaded at
+    runtime by ``GoogleClient`` — no need to store them per user.
+    ``scopes`` are NOT stored here either; the registry's top-level ``scopes``
+    field (user-selected) is the authoritative scope list.
+    """
     creds = _safe_get_credentials(token_response, flow)
-    # Scope can be a space-separated string (from manual Google API fetch)
-    # or a list (from oauthlib's flow.fetch_token which parses it).
-    scope_val = token_response.get("scope")
-    if isinstance(scope_val, list):
-        scopes = scope_val
-    elif isinstance(scope_val, str) and scope_val:
-        scopes = scope_val.split()
-    elif creds and creds.scopes:
-        scopes = list(creds.scopes)
-    else:
-        scopes = []
     return {
         "token": creds.token if creds else token_response.get("access_token"),
         "refresh_token": creds.refresh_token if creds else token_response.get("refresh_token"),
         "token_uri": creds.token_uri if creds else "https://oauth2.googleapis.com/token",
-        "client_id": creds.client_id if creds else None,
-        "client_secret": creds.client_secret if creds else None,
         "expiry": creds.expiry.isoformat() if creds and creds.expiry else None,
-        "scopes": scopes,
     }
 
 
