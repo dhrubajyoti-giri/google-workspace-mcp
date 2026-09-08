@@ -312,6 +312,23 @@ def scope_selector(request: Request):
     # Check if user was already identified (from step 1)
     session = _callback_session.get(rid)
     if not session or not session.get("email"):
+        # Check if scope selector is in skip mode (single-step auth)
+        if settings.scope_selector_mode == "skip":
+            # Direct to Google with default scopes + identity scopes in one step.
+            # No separate identify → chooser → authorize flow.
+            scopes = list(settings.default_scopes)
+            for s in ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"):
+                if s not in scopes:
+                    scopes.append(s)
+            state = f"{rid}|skip_auth"
+            auth_url = _google_auth_url(
+                scopes=scopes,
+                state=state,
+                access_type="offline",
+                include_granted=False,
+            )
+            return RedirectResponse(url=auth_url, status_code=302)
+
         # Step A: redirect to Google to identify the user (step 1)
         state = f"{rid}|identify"
         auth_url = _google_auth_url(
@@ -477,8 +494,43 @@ def callback(request: Request):
             access_token = provider._issue_access_token(email, granted_scopes)
             return _success_page_with_token(email, granted_scopes, access_token)
 
-    else:
-        return _error_page(f"Unknown OAuth step: {step}")
+    elif step == "skip_auth":
+        # Single-step auth (SCOPE_SELECTOR_MODE=skip):
+        # Google OAuth with default_scopes + identity scopes in one redirect.
+        # The callback receives everything (email + access token) at once.
+        email = _extract_email(token_response, flow)
+        if not email:
+            return _error_page("Could not determine user email.")
+
+        granted_scopes = list(settings.default_scopes)
+        # Remove identity scopes from the MCP token scope set (they're internal)
+        for s in ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"):
+            if s in granted_scopes:
+                granted_scopes.remove(s)
+
+        # Store in registry
+        creds_data = _build_token_data(token_response, flow)
+        registry.save(email, creds_data, granted_scopes)
+        log.info("Single-step auth complete for %s, scopes=%d", email, len(granted_scopes))
+
+        # Clean up in-memory stores
+        provider._auth_requests._requests.pop(rid, None)
+
+        if auth_req.get("redirect_uri"):
+            mcp_code = provider._generate_mcp_auth_code(
+                client_id=auth_req["client_id"],
+                code_challenge=auth_req.get("code_challenge", ""),
+                redirect_uri=auth_req.get("redirect_uri", ""),
+                scopes=granted_scopes,
+                subject=email,
+            )
+            redirect_uri = auth_req.get("redirect_uri", "")
+            mcp_state = auth_req.get("mcp_state", "")
+            params = f"code={mcp_code}&state={mcp_state}"
+            return RedirectResponse(url=f"{redirect_uri}?{params}", status_code=302)
+        else:
+            access_token = provider._issue_access_token(email, granted_scopes)
+            return _success_page_with_token(email, granted_scopes, access_token)
 
 
 # ── HTML rendering ──────────────────────────────────────────────────────────

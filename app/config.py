@@ -87,17 +87,17 @@ class Settings(BaseSettings):
     ]
 
     # ── Env-var-driven scope configuration ──
-    # AVAILABLE_SCOPES: all scopes to show in the scope selector (comma-separated)
-    #   If not set, falls back to _read_scopes + _write_scopes (+ chat if enabled)
+    # AVAILABLE_SCOPES: the single list of Google API scopes to show in the
+    # scope selector. If not set, falls back to _read_scopes + _write_scopes
+    # (+ _chat_scopes if ENABLE_CHAT_SCOPES=true). Identity scopes
+    # (openid, userinfo.email, userinfo.profile) are always included.
+    #
+    # READONLY_SCOPES and GOOGLE_SCOPES are removed — read-only detection
+    # is automatic (any scope with "readonly" in the name), and default
+    # scopes come from AVAILABLE_SCOPES.
     available_scopes_raw: str = Field(
         default="",
         validation_alias=AliasChoices("AVAILABLE_SCOPES"),
-    )
-    # READONLY_SCOPES: subset of AVAILABLE_SCOPES that are read-only (green UI)
-    #   If not set, falls back to _read_scopes
-    readonly_scopes_raw: str = Field(
-        default="",
-        validation_alias=AliasChoices("READONLY_SCOPES"),
     )
     # Enable Chat API scopes (requires Chat API enabled in GCP console)
     enable_chat_scopes: bool = Field(
@@ -112,36 +112,43 @@ class Settings(BaseSettings):
         Order:
         1. AVAILABLE_SCOPES env var (if set — user's custom list)
         2. _read_scopes + _write_scopes + optional _chat_scopes (default fallback)
+        Always includes identity scopes (openid, userinfo.email, userinfo.profile).
         """
         env_scopes = _parse_scopes(self.available_scopes_raw)
         if env_scopes:
-            # Add identity scopes that are always needed
-            for s in ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"):
-                if s not in env_scopes:
-                    env_scopes.append(s)
-            return env_scopes
-        scopes = self._read_scopes + self._write_scopes
-        if self.enable_chat_scopes:
-            scopes += self._chat_scopes
-        scopes += [
-            "openid",
-            "https://www.googleapis.com/auth/userinfo.email",
-            "https://www.googleapis.com/auth/userinfo.profile",
-        ]
+            scopes = env_scopes
+        else:
+            scopes = self._read_scopes + self._write_scopes
+            if self.enable_chat_scopes:
+                scopes += self._chat_scopes
+        # Identity scopes are always needed
+        for s in ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"):
+            if s not in scopes:
+                scopes.append(s)
         return scopes
 
     @property
     def read_scopes(self) -> list[str]:
-        """Scopes marked as read-only (for UI coloring)."""
-        env_read = _parse_scopes(self.readonly_scopes_raw)
-        if env_read:
-            return env_read
+        """Scopes marked as read-only (for UI coloring).
+
+        Auto-inferred: any scope containing 'readonly' is considered read-only.
+        Falls back to the built-in _read_scopes list when AVAILABLE_SCOPES
+        is not set (so the default set still has explicit read-only labeling).
+        """
+        env_scopes = _parse_scopes(self.available_scopes_raw)
+        if env_scopes:
+            # Auto-infer: any scope with 'readonly' in the path is read-only
+            return [s for s in env_scopes if "readonly" in s]
         return self._read_scopes
 
     @property
     def default_scopes(self) -> list[str]:
-        """Scopes used if MCP client doesn't request specific ones."""
-        env_scopes = _parse_scopes(self.google_scopes_raw)
+        """Default Google scopes used if MCP client doesn't request any.
+
+        Defaults to read-only scopes only (safest default). Override via
+        AVAILABLE_SCOPES if you want wider defaults.
+        """
+        env_scopes = _parse_scopes(self.available_scopes_raw)
         if env_scopes:
             return env_scopes
         return self._read_scopes + [
@@ -149,11 +156,6 @@ class Settings(BaseSettings):
             "https://www.googleapis.com/auth/userinfo.email",
             "https://www.googleapis.com/auth/userinfo.profile",
         ]
-
-    @property
-    def google_scopes(self) -> list[str]:
-        """Effective Google scopes (from env or default)."""
-        return self.default_scopes
 
     # ── Human-readable scope descriptions for the scope selector UI ──
     # Maps scope string → (display name, category)
