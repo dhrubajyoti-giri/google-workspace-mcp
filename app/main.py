@@ -55,6 +55,7 @@ from mcp.server.auth.routes import (
     create_protected_resource_routes,
     build_resource_metadata_url,
 )
+from starlette.authentication import AuthCredentials
 from starlette.middleware.authentication import AuthenticationMiddleware
 
 logging.basicConfig(

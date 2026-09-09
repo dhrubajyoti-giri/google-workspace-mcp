@@ -14,15 +14,15 @@ YOUR_DOMAIN_HERE {
     reverse_proxy google-workspace-mcp:8000 {
         transport http {
             read_buffer 16mb
-            response_header_up X-Served-By "caddy-google-workspace-mcp"
         }
+        header_up X-Served-By "caddy-google-workspace-mcp"
     }
 
     # Health check (no auth)
     @health {
         path /healthz
     }
-    handle_path @health {
+    handle @health {
         reverse_proxy google-workspace-mcp:8000
         header Cache-Control "no-cache"
     }
