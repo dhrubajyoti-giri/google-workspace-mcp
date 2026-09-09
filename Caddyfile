@@ -1,44 +1,36 @@
-# ═════════════════════════════════════════════════════════════
-# Caddy reverse proxy for the Google Workspace MCP (default mode)
+# Caddy reverse proxy for the Google Workspace MCP
 #
-# DEFAULT mode: /mcp/* is BLOCKED from the public internet.
-# MCP clients (QwenPaw, Claude Desktop, Claude Code) connect directly
-# to the container on localhost:
+# Proxies ALL traffic (including /mcp/*) to the MCP container.
+# /mcp/* security is enforced by MCPAuthMiddleware in the MCP server
+# itself: bearer-token (JWT) auth is required for all MCP JSON-RPC
+# methods except server/discover (pre-auth negotiation per MCP 2026-07-28 spec).
 #
-#   http://127.0.0.1:8000/mcp/
-#
-# The bearer-token (JWT) auth on /mcp *is* functional, but the 403
-# block is a second layer — defense-in-depth. If you prefer to rely
-# solely on JWT and expose /mcp publicly, use the
-# Caddyfile.example-full-proxy instead.
-#
-# ── Public endpoints (allowed from anywhere) ──
+# Public endpoints:
 #   OAuth discovery: /.well-known/oauth-authorization-server
-#   OAuth discovery: /.well-known/oauth-protected-resource/mcp
 #   OAuth flows:     /authorize /token /register /revoke
 #   OAuth web UI:    /oauth/scale /oauth/callback
+#   MCP endpoint:    /mcp/ (requires MCP bearer token)
 #   Health:          /healthz, /
-#
-# ── Blocked endpoints ──
-#   /mcp/* — localhost only, 403 from public internet
 #
 # Copy this domain block into your Caddy instance and set
 # YOUR_DOMAIN_HERE to your EXTERNAL_URL domain (e.g. mcp.example.com).
-# ═════════════════════════════════════════════════════════════
 
 YOUR_DOMAIN_HERE {
-    # ── BLOCKED from public internet ──────────────────────────
-    # /mcp/* is only reachable via localhost.
-    route /mcp/* {
-        respond 403
-    }
-
-    # ── Everything else: proxy to the MCP container ──────────
+    # Proxy all traffic to the MCP container
     reverse_proxy google-workspace-mcp:8000 {
         transport http {
             read_buffer 16mb
             response_header_up X-Served-By "caddy-google-workspace-mcp"
         }
+    }
+
+    # Health check (no auth, cache-busted)
+    @health {
+        path /healthz
+    }
+    handle_path @health {
+        reverse_proxy google-workspace-mcp:8000
+        header Cache-Control "no-cache"
     }
 
     encode zstd gzip
