@@ -68,7 +68,7 @@ log = logging.getLogger("google-workspace-mcp")
 # These are used to:
 # 1. Build the AuthSettings for the MCP SDK
 # 2. Mount auth routes at the root level via create_auth_routes()
-# 3. Wrap /mcp with RequireAuthMiddleware
+# 3. Wrap /mcp with MCPAuthMiddleware
 auth_settings = AuthSettings(
     issuer_url=str(settings.external_url).rstrip("/"),
     resource_server_url=f"{str(settings.external_url).rstrip('/')}/mcp",
@@ -373,17 +373,22 @@ for route in _protected_routes:
 app.include_router(oauth_router)
 
 # ── MCP mount (protected — requires MCP bearer token) ────────
-# MCPAuthMiddleware checks scope["user"] (set by AuthenticationMiddleware).
-# Allows server/discover POSTs through without auth (pre-auth negotiation).
-# All other requests require a valid bearer token (401 if missing/invalid).
+# Middleware order — ServerDiscoverMiddleware MUST be outermost so it can
+# intercept QwenPaw's server/discover JSON-RPC calls (sent as standard
+# JSON-RPC in the body, NOT as an mcp-method header) and respond with 200
+# before MCPAuthMiddleware rejects them with 401.
+#
+# Flow: ServerDiscoverMiddleware → MCPAuthMiddleware → MCP ASGI app
 mcp_asgi = create_mcp_asgi()
-mcp_asgi = ServerDiscoverMiddleware(mcp_asgi)  # handle QwenPaw's server/discover
 protected_mcp = MCPAuthMiddleware(
     mcp_asgi,
     required_scopes=[],  # no MCP-level scope requirements — token required only
     resource_metadata_url=_resource_metadata_url,
 )
-app.mount("/mcp", protected_mcp)
+# ServerDiscoverMiddleware intercepts server/discover POSTs (pre-auth
+# protocol negotiation) so QwenPaw's connect() succeeds without a bearer token.
+mcp_asgi = ServerDiscoverMiddleware(protected_mcp)
+app.mount("/mcp", mcp_asgi)
 
 
 # ── Health + root (public) ───────────────────────────────────
