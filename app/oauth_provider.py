@@ -22,6 +22,7 @@ import time
 from typing import Any
 
 import jwt
+from pydantic import AnyUrl
 
 
 from mcp.server.auth.provider import (
