@@ -465,50 +465,60 @@ def _error_page(message: str) -> HTMLResponse:
 
 def _render_scope_form(rid, visible_scopes, request):
     """Render scope selection form (no pre-checking). Google cannot deselect
-    previously-granted scopes, so the bridge lets users choose here first."""
+    previously-granted scopes, so the bridge lets users choose here first.
+
+    Scopes are grouped into two explicit sections:
+      - Read-only scopes  — safe, view-only access
+      - Read + Write scopes — modify/send/delete access
+    A checkbox per scope controls what is sent to Google. Only checked scopes
+    are included in the ``scope`` parameter of the Google authorization request.
+    """
     labels = settings.scope_labels
     read_set = set(settings.read_scopes)
 
-    rows = []
+    # Partition scopes into read-only and read+write sections
+    read_rows = []
+    write_rows = []
     for scope in visible_scopes:
         label = labels.get(scope, scope.replace("https://www.googleapis.com/auth/", ""))
-        is_readonly = scope in read_set or "readonly" in scope
-        if is_readonly:
-            risk = "color:#2e7d32"
-        else:
-            risk = "color:#c62828;font-weight:bold"
         field_name = "scope_" + scope.replace("://", "_").replace("/", "_").replace(".", "_")
-        rows.append(
-            '<label style="display:flex;align-items:center;padding:6px 0;border-bottom:1px solid #eee">'
-            '<input type="checkbox" name="' + field_name + '" value="1" style="margin-right:10px;width:16px;height:16px">'
-            '<span style="' + risk + '">' + label + '</span></label>'
-        )
+        is_readonly = scope in read_set or "readonly" in scope
+        checkbox = '<input type="checkbox" name="' + field_name + '" value="1" style="margin-right:10px;width:16px;height:16px">'
+        row = '<label style="display:flex;align-items:center;padding:6px 0;border-bottom:1px solid #eee">' + checkbox + label + '</label>'
+        if is_readonly:
+            read_rows.append(row)
+        else:
+            write_rows.append(row)
 
-    rows_html = "\n".join(rows)
-    total = len(visible_scopes)
-    read_count = sum(1 for s in visible_scopes if s in read_set or "readonly" in s)
-    write_count = total - read_count
+    read_count = len(read_rows)
+    write_count = len(write_rows)
+    rows_read = "\n".join(read_rows) if read_rows else '<p style="font-size:12px;color:#999">No read-only scopes available.</p>'
+    rows_write = "\n".join(write_rows) if write_rows else '<p style="font-size:12px;color:#999">No read+write scopes available.</p>'
 
     html = (
         '<!DOCTYPE html>\n'
         '<html><head><title>Google Workspace MCP - Scope Selection</title>\n'
         '<meta name="viewport" content="width=device-width,initial-scale=1">\n'
         '<style>\n'
-        '  body{font-family:-apple-system,sans-serif;max-width:700px;margin:30px auto;padding:0 20px;background:#fafafa}\n'
+        '  body{font-family:-apple-system,sans-serif;max-width:720px;margin:30px auto;padding:0 20px;background:#fafafa}\n'
         '  h1{color:#1a237e;font-size:22px}\n'
         '  .subtitle{color:#666;font-size:13px;margin-bottom:20px}\n'
         '  .info{background:#fff3cd;padding:12px 16px;border:1px solid #ffeaa7;border-radius:8px;margin-bottom:20px;font-size:13px}\n'
         '  .info strong{color:#856404}\n'
-        '  .scopes{background:white;border:1px solid #e0e0e0;border-radius:8px;padding:16px;max-height:400px;overflow-y:auto}\n'
+        '  .section{background:white;border:1px solid #e0e0e0;border-radius:8px;padding:12px 16px;margin-bottom:16px}\n'
+        '  .section h3{font-size:14px;font-weight:600;margin:0 0 8px 0}\n'
+        '  .section.read h3{color:#2e7d32}\n'
+        '  .section.write h3{color:#c62828}\n'
+        '  .scopes{max-height:320px;overflow-y:auto}\n'
         '  .actions{margin:20px 0;text-align:center}\n'
-        '  button{background:#0066cc;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;margin:0 5px}\n'
+        '  button{background:#0066cc;color:white;border:none;padding:8px 18px;border-radius:6px;cursor:pointer;font-size:13px;margin:0 5px}\n'
         '  button:hover{background:#0052a3}\n'
-        '  .preset{background:#37474f;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;margin:0 5px}\n'
+        '  .preset{background:#37474f;color:white;border:none;padding:8px 18px;border-radius:6px;cursor:pointer;font-size:13px;margin:0 5px}\n'
         '  .preset.readonly{background:#2e7d32}\n'
         '  .preset.readonly:hover{background:#1b5e20}\n'
         '  .preset.full{background:#c62828}\n'
         '  .preset.full:hover{background:#b71c1c}\n'
-        '  .summary{font-size:12px;color:#888;margin-top:15px}\n'
+        '  .summary{font-size:12px;color:#888;margin-top:12px}\n'
         '  input[type="checkbox"]{width:16px;height:16px;cursor:pointer}\n'
         '</style></head><body>\n'
         '<h1>Google Workspace MCP</h1>\n'
@@ -517,31 +527,42 @@ def _render_scope_form(rid, visible_scopes, request):
         '  <strong>Important:</strong> Google does not let you deselect previously granted scopes on its consent page.<br>\n'
         '  That is why the bridge shows this selector first. Select exactly what you need,<br>\n'
         '  then Google will show its consent screen for only those scopes.<br><br>\n'
-        '  Scopes already authorized in a previous session <strong>cannot be removed here</strong>.<br>\n'
+        '  <strong>Warning:</strong> Scopes already authorized in a previous session <strong>cannot be removed here</strong>.<br>\n'
         '  To truly remove them, go to Google Account → Security → "Third-party apps with account access"<br>\n'
         '  → remove this app, then re-authorize with only the scopes you want.\n'
         '</div>\n'
         '<form method="POST" action="/oauth/scale?rid=' + rid + '">\n'
-        '  <div class="scopes">' + rows_html + '</div>\n'
         '  <div class="actions">\n'
-        '    <button type="button" class="preset readonly" onclick="selectRead()">Read-only only</button>\n'
-        '    <button type="button" class="preset full" onclick="selectFull()">Full access (all)</button>\n'
-        '    <button type="button" onclick="selectAll(true)">Select All</button>\n'
-        '    <button type="button" onclick="selectAll(false)">Deselect All</button>\n'
+        '    <button type="button" class="preset readonly" onclick="selectSection()">Only read-only scopes</button>\n'
+        '    <button type="button" class="preset full" onclick="selectAll(true)">All scopes (full access)</button>\n'
+        '    <button type="button" class="preset" onclick="selectAll(false)">Deselect All</button>\n'
         '    <button type="submit" style="background:#2e7d32">Authorize with Google</button>\n'
         '  </div>\n'
-        '  <p class="summary">' + str(read_count) + ' read-only, ' + str(write_count) + ' read+write scopes</p>\n'
+        '<div class="summary">' + str(read_count) + ' read-only + ' + str(write_count) + ' read+write = ' + str(read_count + write_count) + ' total</div>\n'
+        '  <div class="section read">\n'
+        '    <h3>\u2b0f\ufe0f Read-only scopes (' + str(read_count) + ')</h3>\n'
+        '    <button type="button" onclick="toggleSection(true)" style="font-size:11px;padding:4px 8px;margin-bottom:6px">Select all read-only</button>\n'
+        '    <div class="scopes">' + rows_read + '</div>\n'
+        '  </div>\n'
+        '  <div class="section write">\n'
+        '    <h3>\U0000270f\ufe0f Read + Write scopes (' + str(write_count) + ')</h3>\n'
+        '    <button type="button" onclick="toggleSection(false)" style="font-size:11px;padding:4px 8px;margin-bottom:6px">Select all read+write</button>\n'
+        '    <div class="scopes">' + rows_write + '</div>\n'
+        '  </div>\n'
+        '  <p class="summary">Only checked scopes will be sent to Google for authorization.</p>\n'
         '</form>\n'
         '<script>\n'
         "  function selectAll(checked) {\n"
         "    document.querySelectorAll('input[type=\"checkbox\"]').forEach(function(cb) { cb.checked = checked; });\n"
         '  }\n'
-        "  function selectRead() {\n"
-        "    var all = document.querySelectorAll('input[type=\"checkbox\"]');\n"
-        "    all.forEach(function(cb) { cb.checked = cb.closest('label').querySelector('span').style.color === '#2e7d32'; });\n"
+        "  function selectSection() {\n"
+        "    document.querySelectorAll('.section.read input[type=\"checkbox\"]').forEach(function(cb) { cb.checked = true; });\n"
+        "    document.querySelectorAll('.section.write input[type=\"checkbox\"]').forEach(function(cb) { cb.checked = false; });\n"
         '  }\n'
-        "  function selectFull() {\n"
-        "    document.querySelectorAll('input[type=\"checkbox\"]').forEach(function(cb) { cb.checked = true; });\n"
+        "  function toggleSection(readOnly) {\n"
+        "    var cls = readOnly ? '.section.read' : '.section.write';\n"
+        "    var boxes = document.querySelector(cls).querySelectorAll('input[type=\"checkbox\"]');\n"
+        "    boxes.forEach(function(cb) { cb.checked = true; });\n"
         '  }\n'
         '</script>\n'
         '</body></html>'
