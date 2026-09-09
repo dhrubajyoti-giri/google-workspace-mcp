@@ -193,10 +193,10 @@ class ServerDiscoverMiddleware:
             pass
 
         # Re-inject body for the MCP ASGI app.
-        # Must return http.disconnect on subsequent calls — the MCP SDK's
-        # streamable HTTP handler calls receive() repeatedly to drain the
-        # body and check for disconnect. If _receive() always returns the
-        # same http.request body, the handler loops forever → 100% CPU.
+        # First call returns the body; subsequent calls fall through to the
+        # original receive() so the SSE handler can detect real client
+        # disconnects (instead of getting a fake http.disconnect that closes
+        # the stream prematurely).
         _body_injected = False
 
         async def _receive():
@@ -204,7 +204,10 @@ class ServerDiscoverMiddleware:
             if not _body_injected:
                 _body_injected = True
                 return {"type": "http.request", "body": body, "more_body": False}
-            return {"type": "http.disconnect"}
+            # Pass through to original receive for real disconnect detection
+            # Returning http.disconnect immediately tricks the SSE handler into
+            # closing the stream before any response is sent.
+            return await receive()
 
         await self.app(scope, _receive, send)
 
