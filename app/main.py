@@ -192,9 +192,19 @@ class ServerDiscoverMiddleware:
         except (json.JSONDecodeError, UnicodeDecodeError, KeyError):
             pass
 
-        # Re-inject body for the MCP ASGI app
+        # Re-inject body for the MCP ASGI app.
+        # Must return http.disconnect on subsequent calls — the MCP SDK's
+        # streamable HTTP handler calls receive() repeatedly to drain the
+        # body and check for disconnect. If _receive() always returns the
+        # same http.request body, the handler loops forever → 100% CPU.
+        _body_injected = False
+
         async def _receive():
-            return {"type": "http.request", "body": body, "more_body": False}
+            nonlocal _body_injected
+            if not _body_injected:
+                _body_injected = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.disconnect"}
 
         await self.app(scope, _receive, send)
 
