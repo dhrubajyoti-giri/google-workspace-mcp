@@ -354,6 +354,23 @@ async def lifespan(app: FastAPI):
     log.info("Google Workspace MCP shutting down")
 
 
+# ── MCP endpoint path normalizer ────────────────────────────
+# QwenPaw's MCP client may send to /mcp (no trailing slash).
+# Starlette's redirect_slashes=True returns 307 -> /mcp/ — but MCP clients
+# do not always follow POST redirects -> 'inactive' -> 503.
+# This middleware rewrites /mcp -> /mcp/ internally before routing,
+# so no redirect is ever sent.  Handles both /mcp and /mcp/ identically.
+class MCPPathNormalizer:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path") == "/mcp":
+            scope = dict(scope)
+            scope["path"] = "/mcp/"
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(
     title="Google Workspace MCP",
     version=settings.mcp_server_version,
@@ -403,6 +420,8 @@ protected_mcp = MCPAuthMiddleware(
 # protocol negotiation) so QwenPaw's connect() succeeds without a bearer token.
 mcp_asgi = ServerDiscoverMiddleware(protected_mcp)
 app.mount("/mcp", mcp_asgi)
+
+app.add_middleware(MCPPathNormalizer)
 
 
 # ── Health + root (public) ───────────────────────────────────
