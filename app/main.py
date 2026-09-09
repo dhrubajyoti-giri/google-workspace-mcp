@@ -198,6 +198,49 @@ class ServerDiscoverMiddleware:
         await self.app(scope, _receive, send)
 
 
+# ── Custom BearerAuthBackend (fixes server/discover 503) ──────────
+import time as _time
+
+
+class MCPBearerAuthBackend(BearerAuthBackend):
+    """BearerAuthBackend that does not raise on invalid tokens.
+
+    The stock BearerAuthBackend.authenticate() calls
+    token_verifier.verify_token(token) which may raise for an
+    expired / malformed token. Starlette's AuthenticationMiddleware
+    catches that and fires on_error -> 401 **before** the mounted
+    /mcp app (with MCPAuthMiddleware) ever runs. That makes
+    server/discover (which should be pre-auth) fail with 401,
+    breaking QwenPaw's init() -> connect() -> 503 "inactive".
+
+    Fix: return None for server/discover POSTs (skip auth entirely),
+    and catch verify_token exceptions (return None instead of raising).
+    """
+
+    async def authenticate(self, conn):
+        # server/discover is a pre-auth negotiation step — skip bearer check
+        for key, value in conn.headers.items():
+            if key.lower() == "mcp-method":
+                method = value if isinstance(value, str) else value.decode("ascii", "replace")
+                if method == "server/discover":
+                    return None
+
+        auth_header = conn.headers.get("authorization")
+        if not auth_header or not auth_header.lower().startswith("bearer "):
+            return None
+
+        token = auth_header[7:]
+        try:
+            auth_info = await self.token_verifier.verify_token(token)
+        except Exception:
+            return None
+        if not auth_info:
+            return None
+        if auth_info.expires_at and auth_info.expires_at < int(_time.time()):
+            return None
+        return AuthCredentials(auth_info.scopes), AuthenticatedUser(auth_info)
+
+
 # ── MCP Auth Middleware (allows server/discover without bearer token) ──
 class MCPAuthMiddleware:
     """Auth middleware for /mcp that allows ``server/discover`` without a bearer token.
@@ -311,7 +354,9 @@ app = FastAPI(
 app.add_middleware(AuthContextMiddleware)
 app.add_middleware(
     AuthenticationMiddleware,
-    backend=BearerAuthBackend(token_verifier),
+    backend=MCPBearerAuthBackend(token_verifier),
+    # on_error only fires if authenticate() raises; MCPBearerAuthBackend never
+    # raises (returns None instead), so this is a safe fallback.
     on_error=lambda conn, exc: JSONResponse({"detail": str(exc)}, status_code=401),
 )
 
