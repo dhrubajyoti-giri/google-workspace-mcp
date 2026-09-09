@@ -7,6 +7,10 @@ token.json
 *.key
 *.pem
 
+# Deploy scripts / automation JSON — contain host secrets, never commit
+deploy-fix.sh
+commit-and-toggle.json
+
 # Python
 __pycache__/
 *.py[cod]
