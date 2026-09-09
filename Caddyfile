@@ -13,24 +13,24 @@
 #   Health:          /healthz, /
 #
 # Copy this domain block into your Caddy instance and set
-# YOUR_DOMAIN_HERE to your EXTERNAL_URL domain (e.g. mcp.example.com).
+# YOUR_DOMAIN_HERE to your EXTERNAL_URL domain.
 
 YOUR_DOMAIN_HERE {
-    # Proxy all traffic to the MCP container
-    reverse_proxy google-workspace-mcp:8000 {
-        transport http {
-            read_buffer 16mb
-            response_header_up X-Served-By "caddy-google-workspace-mcp"
-        }
-    }
-
-    # Health check (no auth, cache-busted)
+    # Health check — route BEFORE catch-all so it gets Cache-Control: no-cache
     @health {
         path /healthz
     }
-    handle_path @health {
+    handle @health {
         reverse_proxy google-workspace-mcp:8000
         header Cache-Control "no-cache"
+    }
+
+    # Proxy all traffic to the MCP container
+    reverse_proxy google-workspace-mcp:8000 {
+        transport http {
+            read_buffer 16mb       # handles large tools/list responses
+        }
+        header_up X-Served-By "caddy-google-workspace-mcp"
     }
 
     encode zstd gzip
