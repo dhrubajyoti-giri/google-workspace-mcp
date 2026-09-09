@@ -44,3 +44,6 @@ drivers/mcp/google-workspace-mcp-generated.yaml
 # OS
 .DS_Store
 Thumbs.db
+
+# QwenPaw memory/journal notes (written to project dir, not project code)
+memory/
