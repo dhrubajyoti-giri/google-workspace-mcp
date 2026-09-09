@@ -23,6 +23,48 @@ from app.tools.slides import slides_get as _slides_get, slides_create as _slides
 
 log = logging.getLogger("google-workspace-mcp")
 
+
+# ── Scope-based tool filtering ──────────────────────────────────────────────
+
+# Maps each tool name to the Google API scope(s) that satisfy it.
+# A tool is shown to a user only if their OAuth token contains at least
+# one of the listed scope names (the suffix after auth/ prefix, e.g.
+# "gmail.readonly").  Broad scopes (e.g. "gmail.modify", "drive") satisfy
+# narrower requirements (e.g. "gmail.readonly", "drive.readonly").
+TOOL_SCOPE_REQUIREMENTS: dict[str, list[str]] = {
+    # Gmail — read tools need at least a read-level Gmail scope
+    "gmail_search":      ["gmail.readonly", "gmail.metadata", "gmail.modify"],
+    "gmail_get_message":  ["gmail.readonly", "gmail.metadata", "gmail.modify"],
+    # Gmail — write tools need a send/modify-level Gmail scope
+    "gmail_send":         ["gmail.send", "gmail.modify"],
+    "gmail_create_draft": ["gmail.compose", "gmail.modify"],
+    # Drive — read tools
+    "drive_search":        ["drive.readonly", "drive", "drive.file", "drive.metadata"],
+    "drive_get_file":      ["drive.readonly", "drive", "drive.file"],
+    # Drive — write tools
+    "drive_upload_file":   ["drive.file", "drive"],
+    "drive_create_file":   ["drive.file", "drive"],
+    "drive_delete_file":   ["drive.file", "drive"],
+    # Docs — read tools need documents.readonly; write tools need documents
+    "docs_get":    ["documents.readonly", "documents"],
+    "docs_create": ["documents"],
+    "docs_update": ["documents"],
+    # Sheets — read tools need spreadsheets.readonly; write tools need spreadsheets
+    "sheets_get":    ["spreadsheets.readonly", "spreadsheets"],
+    "sheets_update": ["spreadsheets"],
+    "sheets_append": ["spreadsheets"],
+    # Calendar — read tools need calendar.readonly; write tools need calendar
+    "calendar_list_events":    ["calendar.readonly", "calendar"],
+    "calendar_get_event":      ["calendar.readonly", "calendar"],
+    "calendar_create_event":   ["calendar"],
+    "calendar_update_event":   ["calendar"],
+    "calendar_delete_event":   ["calendar"],
+    # Slides — read tools need presentations.readonly; write tools need presentations
+    "slides_get":    ["presentations.readonly", "presentations"],
+    "slides_create": ["presentations"],
+    "slides_update": ["presentations"],
+}
+
 # ── Protocol version compatibility patch (fallback) ─────────────────
 # QwenPaw's MCP client advertises a protocol version newer than what the
 # installed `mcp` SDK (v1.29.1, pinned <2.0) lists in SUPPORTED_PROTOCOL_VERSIONS.
@@ -380,6 +422,71 @@ def slides_update(presentation_id: str, requests_json: str) -> dict[str, Any]:
     Returns: the batchUpdate response with replies.
     """
     return _slides_update(presentation_id, requests_json)
+
+
+# ── Scope-based tool filtering ──────────────────────────────────────────────
+# Wire up filtering so that ``tools/list`` only returns the tools the
+# authenticated user is actually authorized to use (based on the Google API
+# scopes in their OAuth token).  This replaces the previous behaviour where
+# every user saw all 23 tools regardless of the scopes they granted.
+
+_orig_list_tools = mcp.list_tools  # bound method — self is already captured
+
+
+def _strip_scope(scope_url: str) -> str:
+    """Extract the short scope name from a full Google API scope URL.
+
+    ``https://www.googleapis.com/auth/gmail.readonly`` → ``gmail.readonly``
+    """
+    prefix = "https://www.googleapis.com/auth/"
+    return scope_url[len(prefix):] if scope_url.startswith(prefix) else scope_url
+
+
+async def _filtered_list_tools() -> list[Any]:
+    """Return only the tools the current user is authorized to use.
+
+    Looks up the user's Google email from the MCP auth context (set by
+    ``AuthContextMiddleware``), fetches their granted scopes from the
+    registry, and keeps only tools whose required scope is satisfied.
+    """
+    tools = await _orig_list_tools()
+
+    try:
+        from mcp.server.auth.middleware.auth_context import get_access_token
+        from app.registry import Registry
+
+        access_token = get_access_token()
+        if access_token is None or not access_token.subject:
+            # No authenticated user in context — no tools available.
+            return []
+
+        _reg = Registry(settings.registry_file)
+        user_scopes = _reg.get_scopes(access_token.subject) or []
+        user_scope_names = {_strip_scope(s) for s in user_scopes}
+
+        filtered: list[Any] = []
+        for t in tools:
+            required = TOOL_SCOPE_REQUIREMENTS.get(t.name, [])
+            if not required:
+                # Unknown tool — include to be safe.
+                filtered.append(t)
+                continue
+            if any(sc in user_scope_names for sc in required):
+                filtered.append(t)
+            else:
+                log.debug(
+                    "Filtering tool %s — user lacks scopes %s (has: %s)",
+                    t.name, required, sorted(user_scope_names),
+                )
+        return filtered
+    except Exception as e:
+        log.warning(
+            "Scope-based tool filtering failed (%s) — falling back to all tools", e,
+        )
+        return tools
+
+
+mcp.list_tools = _filtered_list_tools
 
 
 # ── ASGI app factory for FastAPI mount ───────────────────────
