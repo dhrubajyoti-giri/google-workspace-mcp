@@ -537,14 +537,14 @@ def _render_scope_form(rid, visible_scopes, request):
         '  <div class="section read">\n'
         '    <h3>\U00002713\U0000fe0f Read-only scopes (' + str(read_count) + ')</h3>\n'
         '    <div class="actions">\n'
-        '      <button type="button" class="preset-btn readonly" onclick="selectRead()">\U00001f440 Only Read — read-only access only</button>\n'
+        '      <button type="button" class="preset-btn readonly" onclick="toggleRead()">\u25c9 Only Read — read-only access only</button>\n'
         '    </div>\n'
         '    <div class="scopes">' + rows_read + '</div>\n'
         '  </div>\n'
         '  <div class="section write">\n'
         '    <h3>\U0000270f\ufe0f Read + Write scopes (' + str(write_count) + ')</h3>\n'
         '    <div class="actions">\n'
-        '      <button type="button" class="preset-btn full" onclick="selectAll(true)">\U000026a0\ufe0f Full Access — read + write</button>\n'
+        '      <button type="button" class="preset-btn full" onclick="toggleFull()">\u26a1 Full Access — read + write</button>\n'
         '    </div>\n'
         '    <div class="scopes">' + rows_write + '</div>\n'
         '  </div>\n'
@@ -557,9 +557,17 @@ def _render_scope_form(rid, visible_scopes, request):
         "  function selectAll(checked) {\n"
         "    document.querySelectorAll('input[type=\"checkbox\"]').forEach(function(cb) { cb.checked = checked; });\n"
         '  }\n'
-        "  function selectRead() {\n"
-        "    document.querySelectorAll('.section.read input[type=\"checkbox\"]').forEach(function(cb) { cb.checked = true; });\n"
-        "    document.querySelectorAll('.section.write input[type=\"checkbox\"]').forEach(function(cb) { cb.checked = false; });\n"
+        "  function toggleRead() {\n"
+        "    var readBoxes = document.querySelectorAll('.section.read input[type=\"checkbox\"]');\n"
+        "    var writeBoxes = document.querySelectorAll('.section.write input[type=\"checkbox\"]');\n"
+        "    var allReadChecked = Array.from(readBoxes).every(function(cb) { return cb.checked; });\n"
+        "    readBoxes.forEach(function(cb) { cb.checked = !allReadChecked; });\n"
+        "    writeBoxes.forEach(function(cb) { cb.checked = false; });\n"
+        '  }\n'
+        "  function toggleFull() {\n"
+        "    var allBoxes = document.querySelectorAll('input[type=\"checkbox\"]');\n"
+        "    var allChecked = Array.from(allBoxes).every(function(cb) { return cb.checked; });\n"
+        "    selectAll(!allChecked);\n"
         '  }\n'
         '</script>\n'
         '</body></html>'
