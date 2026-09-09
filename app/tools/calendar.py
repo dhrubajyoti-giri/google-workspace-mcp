@@ -103,7 +103,7 @@ def calendar_create_event(
     description: str = "",
     location: str = "",
     attendees: list[dict[str, str]] = None,
-) -> str:
+) -> dict[str, Any]:
     """Create a calendar event.
 
     Parameters:
@@ -111,11 +111,11 @@ def calendar_create_event(
       summary — event title
       start_time — ISO 8601 start (e.g. '2024-01-15T14:00:00+05:30')
       end_time — ISO 8601 end time
-      description — event description
-      location — event location
-      attendees — list of {'email': 'name@example.com'} dicts (optional)
+      description — event description (optional)
+      location — event location (optional)
+      attendees — list of {'email': 'addr'} dicts (optional)
 
-    Returns the new event ID.
+    Returns: dict with id, summary, start, end, location, status, htmlLink, message.
     """
     service = _ensure_auth()
     body: dict[str, Any] = {
@@ -132,7 +132,16 @@ def calendar_create_event(
 
     event = service.events().insert(calendarId=calendar_id, body=body).execute()
     log.info("Created event '%s' — ID: %s", summary, event["id"])
-    return event["id"]
+    return {
+        "id": event["id"],
+        "summary": event.get("summary", ""),
+        "start": event.get("start", {}).get("dateTime", ""),
+        "end": event.get("end", {}).get("dateTime", ""),
+        "location": event.get("location", ""),
+        "status": event.get("status", ""),
+        "htmlLink": event.get("htmlLink", ""),
+        "message": f"Event created successfully — '{summary}' (ID: {event['id']})",
+    }
 
 
 def calendar_update_event(
@@ -143,24 +152,30 @@ def calendar_update_event(
     end_time: str = "",
     description: str = "",
     location: str = "",
-) -> str:
+) -> dict[str, Any]:
     """Update a calendar event by ID.
 
     Only non-empty fields are sent in the patch.
-    Returns the updated event ID.
+    Returns: dict with id, updated_fields, status, message.
     """
     service = _ensure_auth()
     body: dict[str, Any] = {}
+    updated_fields: list[str] = []
     if summary:
         body["summary"] = summary
+        updated_fields.append("summary")
     if start_time:
         body["start"] = {"dateTime": start_time, "timeZone": settings.tz}
+        updated_fields.append("start")
     if end_time:
         body["end"] = {"dateTime": end_time, "timeZone": settings.tz}
+        updated_fields.append("end")
     if description:
         body["description"] = description
+        updated_fields.append("description")
     if location:
         body["location"] = location
+        updated_fields.append("location")
 
     event = service.events().update(
         calendarId=calendar_id,
@@ -168,14 +183,27 @@ def calendar_update_event(
         body=body,
     ).execute()
     log.info("Updated event %s", event_id)
-    return event["id"]
+    return {
+        "id": event["id"],
+        "updated_fields": updated_fields,
+        "status": event.get("status", ""),
+        "htmlLink": event.get("htmlLink", ""),
+        "message": f"Event updated successfully — ID: {event['id']} (fields: {', '.join(updated_fields) if updated_fields else 'none'})",
+    }
 
 
-def calendar_delete_event(calendar_id: str = "primary", event_id: str = "") -> str:
-    """Delete a calendar event by ID. Returns the deleted event ID."""
+def calendar_delete_event(calendar_id: str = "primary", event_id: str = "") -> dict[str, Any]:
+    """Delete a calendar event by ID.
+
+    Returns: dict with id, status, message.
+    """
     service = _ensure_auth()
     service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
     log.info("Deleted event %s from calendar %s", event_id, calendar_id)
-    return event_id
+    return {
+        "id": event_id,
+        "status": "deleted",
+        "message": f"Event deleted successfully — ID: {event_id}",
+    }
 
 

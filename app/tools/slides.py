@@ -65,18 +65,24 @@ def slides_get(presentation_id: str) -> dict[str, Any]:
     }
 
 
-def slides_create(title: str = "Untitled Presentation") -> str:
+def slides_create(title: str = "Untitled Presentation") -> dict[str, Any]:
     """Create a new Google Slides presentation.
 
     Parameters:
       title — presentation title
 
-    Returns the new presentation ID.
+    Returns: dict with id, title, url, status, message.
     """
     service = _ensure_auth()
     pres = service.presentations().create(body={"title": title}).execute()
     log.info("Created presentation '%s' — ID: %s", title, pres["presentationId"])
-    return pres["presentationId"]
+    return {
+        "id": pres["presentationId"],
+        "title": title,
+        "url": f"https://docs.google.com/presentation/d/{pres['presentationId']}/edit",
+        "status": "created",
+        "message": f"Presentation created successfully — '{title}' (ID: {pres['presentationId']})",
+    }
 
 
 def slides_update(presentation_id: str, requests_json: str) -> dict[str, Any]:

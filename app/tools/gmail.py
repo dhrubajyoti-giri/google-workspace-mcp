@@ -119,7 +119,7 @@ def gmail_send(
     body_format: str = "plain",
     cc: str = "",
     bcc: str = "",
-) -> str:
+) -> dict[str, Any]:
     """Send an email via the authenticated Gmail account.
 
     Parameters:
@@ -130,7 +130,7 @@ def gmail_send(
       cc — comma-separated CC recipients (optional)
       bcc — comma-separated BCC recipients (optional)
 
-    Returns the Gmail message ID.
+    Returns: dict with id, threadId, labelIds, to, subject, status, message.
     """
     mime = MIMEText(body, "html" if body_format == "html" else "plain")
     mime["To"] = to
@@ -149,7 +149,17 @@ def gmail_send(
     ).execute()
 
     log.info("Sent email to %s — message ID: %s", to, sent["id"])
-    return sent["id"]
+    return {
+        "id": sent["id"],
+        "threadId": sent.get("threadId", ""),
+        "labelIds": sent.get("labelIds", []),
+        "to": to,
+        "subject": subject,
+        "cc": cc,
+        "bcc": bcc,
+        "status": "sent",
+        "message": f"Email sent successfully to {to} — message ID: {sent['id']}",
+    }
 
 
 def gmail_create_draft(
@@ -159,7 +169,7 @@ def gmail_create_draft(
     body_format: str = "plain",
     cc: str = "",
     bcc: str = "",
-) -> str:
+) -> dict[str, Any]:
     """Create a draft email in the authenticated user's Gmail account.
 
     Parameters:
@@ -170,7 +180,7 @@ def gmail_create_draft(
       cc — comma-separated CC recipients (optional)
       bcc — comma-separated BCC recipients (optional)
 
-    Returns the Gmail draft ID.
+    Returns: dict with id, to, subject, status, message.
     """
     mime = MIMEText(body, "html" if body_format == "html" else "plain")
     mime["To"] = to
@@ -188,4 +198,10 @@ def gmail_create_draft(
     ).execute()
 
     log.info("Draft created — draft ID: %s, to: %s", draft["id"], to)
-    return draft["id"]
+    return {
+        "id": draft["id"],
+        "to": to,
+        "subject": subject,
+        "status": "draft_created",
+        "message": f"Draft created successfully — draft ID: {draft['id']}, to: {to}",
+    }

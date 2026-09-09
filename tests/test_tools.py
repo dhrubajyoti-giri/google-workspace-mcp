@@ -85,13 +85,17 @@ def test_gmail_send_returns_message_id(mock_gmail_service):
         userId="me", body={"raw": "test"}
     ).execute.return_value = {"id": "sent_msg_123", "threadId": "t1"}
 
-    msg_id = gmail_send(
+    result = gmail_send(
         to="test@example.com",
         subject="Test Email",
         body="Hello world",
         body_format="plain",
     )
-    assert msg_id == "sent_msg_123"
+    assert result["id"] == "sent_msg_123"
+    assert result["threadId"] == "t1"
+    assert result["to"] == "test@example.com"
+    assert result["subject"] == "Test Email"
+    assert result["status"] == "sent"
 
 
 def test_gmail_tools_require_auth():
@@ -142,12 +146,15 @@ def test_gmail_create_draft(mock_gmail_service):
         userId="me", body={}
     ).execute.return_value = {"id": "draft_123"}
 
-    draft_id = gmail_create_draft(
+    result = gmail_create_draft(
         to="test@example.com",
         subject="Draft Subject",
         body="Draft body",
     )
-    assert draft_id == "draft_123"
+    assert result["id"] == "draft_123"
+    assert result["to"] == "test@example.com"
+    assert result["subject"] == "Draft Subject"
+    assert result["status"] == "draft_created"
 
 
 def test_drive_upload_file(mock_drive_service):
@@ -175,8 +182,9 @@ def test_drive_delete_file(mock_drive_service):
     # mock files().delete().execute()
     mock_drive_service.files().delete(fileId="file123").execute.return_value = {}
 
-    file_id = drive_delete_file("file123")
-    assert file_id == "file123"
+    result = drive_delete_file("file123")
+    assert result["id"] == "file123"
+    assert result["status"] == "deleted"
 
 
 def test_docs_create(mock_docs_service):
@@ -186,8 +194,10 @@ def test_docs_create(mock_docs_service):
     # Mock docs_update call (for content insertion)
     mock_docs_service.documents().batchUpdate().execute.return_value = {"documentId": "doc456"}
 
-    doc_id = docs_create(title="Test Doc", content="Hello")
-    assert doc_id == "doc456"
+    result = docs_create(title="Test Doc", content="Hello")
+    assert result["id"] == "doc456"
+    assert result["title"] == "Test Doc"
+    assert result["status"] == "created"
 
 
 def test_sheets_update():
@@ -240,14 +250,17 @@ def test_calendar_create_event():
         service.events().insert().execute.return_value = {
             "id": "event_42",
             "summary": "Test Event",
+            "status": "confirmed",
         }
 
-        event_id = calendar_create_event(
+        event = calendar_create_event(
             summary="Test Event",
             start_time="2024-06-01T10:00:00+05:30",
             end_time="2024-06-01T10:30:00+05:30",
         )
-        assert event_id == "event_42"
+        assert event["id"] == "event_42"
+        assert event["summary"] == "Test Event"
+        assert event["status"] == "confirmed"
 
 
 def test_calendar_delete_event():
@@ -262,7 +275,8 @@ def test_calendar_delete_event():
 
         service.events().delete().execute.return_value = {}
         result = calendar_delete_event("primary", "event_42")
-        assert result == "event_42"
+        assert result["id"] == "event_42"
+        assert result["status"] == "deleted"
 
 
 # ── Docs tool tests ─────────────────────────────────────────

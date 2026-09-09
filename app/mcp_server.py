@@ -146,7 +146,7 @@ def gmail_get_message(message_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def gmail_send(to: str, subject: str, body: str, body_format: str = "plain", cc: str = "", bcc: str = "") -> str:
+def gmail_send(to: str, subject: str, body: str, body_format: str = "plain", cc: str = "", bcc: str = "") -> dict[str, Any]:
     """Send an email via the authenticated Gmail account.
 
     Parameters:
@@ -157,7 +157,7 @@ def gmail_send(to: str, subject: str, body: str, body_format: str = "plain", cc:
       cc — comma-separated CC recipients (optional)
       bcc — comma-separated BCC recipients (optional)
 
-    Returns the Gmail message ID.
+    Returns: dict with id, threadId, labelIds, to, subject, status, message.
     """
     return _gmail_send(to, subject, body, body_format, cc, bcc)
 
@@ -258,7 +258,7 @@ def slides_get(presentation_id: str) -> dict[str, Any]:
 # ── Write tools ──────────────────────────────────────────────
 
 @mcp.tool()
-def gmail_create_draft(to: str, subject: str, body: str, body_format: str = "plain", cc: str = "", bcc: str = "") -> str:
+def gmail_create_draft(to: str, subject: str, body: str, body_format: str = "plain", cc: str = "", bcc: str = "") -> dict[str, Any]:
     """Create a draft email in Gmail.
 
     Parameters:
@@ -269,7 +269,7 @@ def gmail_create_draft(to: str, subject: str, body: str, body_format: str = "pla
       cc — comma-separated CC recipients (optional)
       bcc — comma-separated BCC recipients (optional)
 
-    Returns the Gmail draft ID.
+    Returns: dict with id, to, subject, status, message.
     """
     return _gmail_create_draft(to, subject, body, body_format, cc, bcc)
 
@@ -296,20 +296,20 @@ def drive_create_file(name: str, content: str, mime_type: str = "text/plain", pa
 
 
 @mcp.tool()
-def drive_delete_file(file_id: str) -> str:
-    """Delete a file from Google Drive by ID. Returns the deleted file ID."""
+def drive_delete_file(file_id: str) -> dict[str, Any]:
+    """Delete a file from Google Drive by ID. Returns id, status, message."""
     return _drive_delete(file_id)
 
 
 @mcp.tool()
-def docs_create(title: str, content: str = "") -> str:
+def docs_create(title: str, content: str = "") -> dict[str, Any]:
     """Create a new Google Doc.
 
     Parameters:
       title — document title
       content — optional initial text content
 
-    Returns the new document ID.
+    Returns: dict with id, title, url, status, message.
     """
     return _docs_create(title, content)
 
@@ -357,7 +357,7 @@ def sheets_append(spreadsheet_id: str, range: str, values: list[list[str]]) -> d
 
 
 @mcp.tool()
-def calendar_create_event(calendar_id: str = "primary", summary: str = "", start_time: str = "", end_time: str = "", description: str = "", location: str = "", attendees: list[dict[str, str]] = None) -> str:
+def calendar_create_event(calendar_id: str = "primary", summary: str = "", start_time: str = "", end_time: str = "", description: str = "", location: str = "", attendees: list[dict[str, str]] = None) -> dict[str, Any]:
     """Create a calendar event.
 
     Parameters:
@@ -369,7 +369,7 @@ def calendar_create_event(calendar_id: str = "primary", summary: str = "", start
       location — event location (optional)
       attendees — list of {'email': 'addr'} dicts (optional)
 
-    Returns the new event ID.
+    Returns: dict with id, summary, start, end, location, status, htmlLink, message.
     """
     return _cal_create(calendar_id, summary, start_time, end_time, description, location, attendees)
 
@@ -387,25 +387,25 @@ def calendar_update_event(calendar_id: str = "primary", event_id: str = "", summ
       description — new description (or empty to keep)
       location — new location (or empty to keep)
 
-    Returns the updated event ID.
+    Returns: dict with id, updated_fields, status, htmlLink, message.
     """
     return _cal_update(calendar_id, event_id, summary, start_time, end_time, description, location)
 
 
 @mcp.tool()
-def calendar_delete_event(calendar_id: str = "primary", event_id: str = "") -> str:
-    """Delete a calendar event by ID. Returns the deleted event ID."""
+def calendar_delete_event(calendar_id: str = "primary", event_id: str = "") -> dict[str, Any]:
+    """Delete a calendar event by ID. Returns id, status, message."""
     return _cal_delete(calendar_id, event_id)
 
 
 @mcp.tool()
-def slides_create(title: str = "Untitled Presentation") -> str:
+def slides_create(title: str = "Untitled Presentation") -> dict[str, Any]:
     """Create a new Google Slides presentation.
 
     Parameters:
       title — presentation title
 
-    Returns the new presentation ID.
+    Returns: dict with id, title, url, status, message.
     """
     return _slides_create(title)
 

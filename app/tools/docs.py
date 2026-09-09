@@ -127,14 +127,14 @@ def docs_get(document_id: str) -> dict[str, Any]:
     }
 
 
-def docs_create(title: str, content: str = "") -> str:
+def docs_create(title: str, content: str = "") -> dict[str, Any]:
     """Create a new Google Doc.
 
     Parameters:
       title — document title
       content — optional initial text content (inserted after creation)
 
-    Returns the new document ID.
+    Returns: dict with id, title, url, status, message.
     """
     service = _ensure_auth()
     doc = service.documents().create(body={"title": title}, fields="documentId").execute()
@@ -144,7 +144,13 @@ def docs_create(title: str, content: str = "") -> str:
         docs_update(doc_id, content)
 
     log.info("Created Google Doc '%s' — ID: %s", title, doc_id)
-    return doc_id
+    return {
+        "id": doc_id,
+        "title": title,
+        "url": f"https://docs.google.com/document/d/{doc_id}/edit",
+        "status": "created",
+        "message": f"Google Doc created successfully — '{title}' (ID: {doc_id})",
+    }
 
 
 def docs_update(document_id: str, text: str, location_index: int = 1) -> dict[str, Any]:

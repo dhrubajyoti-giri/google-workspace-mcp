@@ -172,14 +172,18 @@ def drive_create_file(
     return drive_upload_file(name, content_b64, mime_type, parent_folder_id)
 
 
-def drive_delete_file(file_id: str) -> str:
+def drive_delete_file(file_id: str) -> dict[str, Any]:
     """Delete a file from Google Drive by ID.
 
     Moves the file to trash (Google Drive API delete permanently removes).
-    Returns the deleted file ID.
+    Returns: dict with id, status, message.
     """
     service = _ensure_auth()
     service.files().delete(fileId=file_id).execute()
     log.info("Deleted Drive file — ID: %s", file_id)
-    return file_id
+    return {
+        "id": file_id,
+        "status": "deleted",
+        "message": f"File deleted successfully — ID: {file_id}",
+    }
 
