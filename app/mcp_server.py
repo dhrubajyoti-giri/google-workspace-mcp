@@ -7,11 +7,13 @@ mounts at ``/mcp``.  Each tool delegates to the implementation in
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlparse
 
 from mcp.server import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import CallToolResult, TextContent
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.tools.gmail import gmail_search as _gmail_search, gmail_get_message as _gmail_get, gmail_send as _gmail_send, gmail_create_draft as _gmail_create_draft
@@ -122,7 +124,7 @@ mcp = FastMCP(
 # ── Gmail tools ──────────────────────────────────────────────
 
 @mcp.tool()
-def gmail_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
+def gmail_search(query: str, max_results: int = 10) -> CallToolResult:
     """Search the authenticated user's Gmail mailbox.
 
     Uses Gmail search syntax.
@@ -132,21 +134,39 @@ def gmail_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
       - 'subject:"meeting notes"' — messages with a subject match
       - 'is:unread' — unread messages
       - 'after:2024/01/01 before:2024/02/01' — date range
+
+    Returns: human-readable summary + structured data (list of message summaries).
     """
-    return _gmail_search(query, max_results)
+    results = _gmail_search(query, max_results)
+    summary = f"Found {len(results)} message(s) matching '{query}'." if results else f"No messages found matching '{query}'."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=results,
+    )
 
 
 @mcp.tool()
-def gmail_get_message(message_id: str) -> dict[str, Any]:
+def gmail_get_message(message_id: str) -> CallToolResult:
     """Retrieve a single Gmail message by ID.
 
-    Returns the full message: headers, body (text + HTML), labels, and internal date.
+    Returns: human-readable summary + structured data (full message with headers, body, labels).
     """
-    return _gmail_get(message_id)
+    result = _gmail_get(message_id)
+    summary = f"Retrieved Gmail message '{result.get('id', '')}'"
+    subject = result.get("headers", {}).get("Subject", "")
+    if subject:
+        summary += f" — subject: '{subject}'"
+    frm = result.get("headers", {}).get("From", "")
+    if frm:
+        summary += f", from: {frm}"
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=result,
+    )
 
 
 @mcp.tool()
-def gmail_send(to: str, subject: str, body: str, body_format: str = "plain", cc: str = "", bcc: str = "") -> dict[str, Any]:
+def gmail_send(to: str, subject: str, body: str, body_format: str = "plain", cc: str = "", bcc: str = "") -> CallToolResult:
     """Send an email via the authenticated Gmail account.
 
     Parameters:
@@ -157,15 +177,19 @@ def gmail_send(to: str, subject: str, body: str, body_format: str = "plain", cc:
       cc — comma-separated CC recipients (optional)
       bcc — comma-separated BCC recipients (optional)
 
-    Returns: dict with id, threadId, labelIds, to, subject, status, message.
+    Returns: human-readable confirmation text + structured data including message ID.
     """
-    return _gmail_send(to, subject, body, body_format, cc, bcc)
+    result = _gmail_send(to, subject, body, body_format, cc, bcc)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
 
 
 # ── Drive tools ──────────────────────────────────────────────
 
 @mcp.tool()
-def drive_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
+def drive_search(query: str, max_results: int = 10) -> CallToolResult:
     """Search the authenticated user's Google Drive.
 
     Uses Google Drive v3 search query syntax.
@@ -174,54 +198,87 @@ def drive_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
       - 'mimeType=\"application/vnd.google-apps.document\"'
       - 'modifiedTime > \"2024-01-01T00:00:00\"'
       - 'name contains \"project\" and trashed=false'
+
+    Returns: human-readable summary + structured data (list of file metadata).
     """
-    return _drive_search(query, max_results)
+    results = _drive_search(query, max_results)
+    summary = f"Found {len(results)} file(s) matching '{query}'." if results else f"No files found matching '{query}'."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=results,
+    )
 
 
 @mcp.tool()
-def drive_get_file(file_id: str) -> dict[str, Any]:
+def drive_get_file(file_id: str) -> CallToolResult:
     """Get a file's metadata and content.
 
     For Google Docs/Sheets/Slides, content is exported as plain text or CSV.
     For binary files, content is returned as base64.
+
+    Returns: human-readable summary + structured data (file metadata + content).
     """
-    return _drive_get(file_id)
+    result = _drive_get(file_id)
+    name = result.get("name", "")
+    mime = result.get("mimeType", "")
+    size = result.get("size", "")
+    summary = f"Retrieved file '{name}' ({mime}"
+    if size:
+        summary += f", {size} bytes"
+    summary += f"). File ID: {result.get('id', '')}"
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=result,
+    )
 
 
 # ── Docs tools ───────────────────────────────────────────────
 
 @mcp.tool()
-def docs_get(document_id: str) -> dict[str, Any]:
+def docs_get(document_id: str) -> CallToolResult:
     """Retrieve a Google Doc's content and structural information.
 
     Parameters:
       document_id — the Google Doc ID (from the doc's URL)
 
-    Returns: title, body text, body_sections (with heading levels),
-    tables, lists, and document metadata.
+    Returns: human-readable summary + structured data (title, body, sections, tables, lists).
     """
-    return _docs_get(document_id)
+    result = _docs_get(document_id)
+    summary = f"Retrieved Google Doc '{result.get('title', '')}' (ID: {result.get('id', '')}) — {len(result.get('body', ''))} characters in body, {len(result.get('body_sections', []))} section(s), {len(result.get('tables', []))} table(s)."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=result,
+    )
 
 
 # ── Sheets tools ─────────────────────────────────────────────
 
 @mcp.tool()
-def sheets_get(spreadsheet_id: str, range: str = "A1:Z100") -> dict[str, Any]:
+def sheets_get(spreadsheet_id: str, range: str = "A1:Z100") -> CallToolResult:
     """Retrieve values from a Google Sheets spreadsheet.
 
     Parameters:
       spreadsheet_id — the spreadsheet ID (from the sheet's URL)
       range — A1 notation range, e.g. 'Sheet1!A1:F20' (default: 'A1:Z100')
 
-    Returns: spreadsheetId, sheetNames, range, values (2D array).
+    Returns: human-readable summary + structured data (sheet names, range, values).
     """
-    return _sheets_get(spreadsheet_id, range)
+    result = _sheets_get(spreadsheet_id, range)
+    sheet_names = result.get("sheetNames", [])
+    values = result.get("values", [])
+    row_count = len(values)
+    col_count = len(values[0]) if values else 0
+    summary = f"Retrieved Google Sheet '{result.get('spreadsheetId', spreadsheet_id)}' — {len(sheet_names)} sheet(s) ({', '.join(sheet_names) if sheet_names else 'none'}), range: {result.get('range', range)}, {row_count} row(s) × {col_count} column(s)."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=result,
+    )
 
 
 # ── Calendar tools ───────────────────────────────────────────
 
 @mcp.tool()
-def calendar_list_events(calendar_id: str = "primary", time_min: str = None, time_max: str = None, max_results: int = 10) -> list[dict[str, Any]]:
+def calendar_list_events(calendar_id: str = "primary", time_min: str = None, time_max: str = None, max_results: int = 10) -> CallToolResult:
     """List events from a Google Calendar.
 
     Parameters:
@@ -230,35 +287,56 @@ def calendar_list_events(calendar_id: str = "primary", time_min: str = None, tim
       time_max — ISO 8601 end time
       max_results — max events to return (default 10)
 
-    Returns: list of events with id, summary, start, end, location, description.
+    Returns: human-readable summary + structured data (list of events).
     """
-    return _cal_list(calendar_id, time_min, time_max, max_results)
+    results = _cal_list(calendar_id, time_min, time_max, max_results)
+    summary = f"Found {len(results)} event(s) on calendar '{calendar_id}'." if results else f"No events found on calendar '{calendar_id}'."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=results,
+    )
 
 
 @mcp.tool()
-def calendar_get_event(calendar_id: str = "primary", event_id: str = "") -> dict[str, Any]:
-    """Get a single calendar event by ID."""
-    return _cal_get(calendar_id, event_id)
+def calendar_get_event(calendar_id: str = "primary", event_id: str = "") -> CallToolResult:
+    """Get a single calendar event by ID.
+
+    Returns: human-readable summary + structured data (event details).
+    """
+    result = _cal_get(calendar_id, event_id)
+    summary = f"Retrieved event '{result.get('summary', '')}' (ID: {result.get('id', '')}) — starts: {result.get('start', '')}, ends: {result.get('end', '')}."
+    location = result.get("location", "")
+    if location:
+        summary += f" Location: {location}."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=result,
+    )
 
 
 # ── Slides tools ─────────────────────────────────────────────
 
 @mcp.tool()
-def slides_get(presentation_id: str) -> dict[str, Any]:
+def slides_get(presentation_id: str) -> CallToolResult:
     """Retrieve a Google Slides presentation's structure and text content.
 
     Parameters:
       presentation_id — the presentation ID (from the URL)
 
-    Returns: title, slideCount, slides (each with pageElements/text).
+    Returns: human-readable summary + structured data (title, slides, page elements).
     """
-    return _slides_get(presentation_id)
+    result = _slides_get(presentation_id)
+    summary = f"Retrieved presentation '{result.get('title', '')}' (ID: {result.get('id', '')}) — {result.get('slideCount', 0)} slide(s), containing text content and page elements."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=result,
+    )
 
 
 # ── Write tools ──────────────────────────────────────────────
 
 @mcp.tool()
-def gmail_create_draft(to: str, subject: str, body: str, body_format: str = "plain", cc: str = "", bcc: str = "") -> dict[str, Any]:
+def gmail_create_draft(to: str, subject: str, body: str, body_format: str = "plain", cc: str = "", bcc: str = "") -> CallToolResult:
     """Create a draft email in Gmail.
 
     Parameters:
@@ -269,13 +347,17 @@ def gmail_create_draft(to: str, subject: str, body: str, body_format: str = "pla
       cc — comma-separated CC recipients (optional)
       bcc — comma-separated BCC recipients (optional)
 
-    Returns: dict with id, to, subject, status, message.
+    Returns: human-readable confirmation text + structured data including draft ID.
     """
-    return _gmail_create_draft(to, subject, body, body_format, cc, bcc)
+    result = _gmail_create_draft(to, subject, body, body_format, cc, bcc)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
 
 
 @mcp.tool()
-def drive_upload_file(name: str, content_base64: str, mime_type: str = "text/plain", parent_folder_id: str = "") -> dict[str, Any]:
+def drive_upload_file(name: str, content_base64: str, mime_type: str = "text/plain", parent_folder_id: str = "") -> CallToolResult:
     """Upload a file to Google Drive.
 
     Parameters:
@@ -284,38 +366,62 @@ def drive_upload_file(name: str, content_base64: str, mime_type: str = "text/pla
       mime_type — MIME type (e.g. 'text/plain', 'application/pdf')
       parent_folder_id — optional parent folder ID
 
-    Returns: file metadata (id, name, mimeType, size, webViewLink).
+    Returns: human-readable confirmation text + structured data including file ID.
     """
-    return _drive_upload(name, content_base64, mime_type, parent_folder_id)
+    result = _drive_upload(name, content_base64, mime_type, parent_folder_id)
+    summary = f"Uploaded '{name}' ({mime_type}, {result.get('size', '?')} bytes) to Google Drive. File ID: {result.get('id', '')}"
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent={**result, "message": summary},
+    )
 
 
 @mcp.tool()
-def drive_create_file(name: str, content: str, mime_type: str = "text/plain", parent_folder_id: str = "") -> dict[str, Any]:
-    """Create a text file in Google Drive with inline content."""
-    return _drive_create(name, content, mime_type, parent_folder_id)
+def drive_create_file(name: str, content: str, mime_type: str = "text/plain", parent_folder_id: str = "") -> CallToolResult:
+    """Create a text file in Google Drive with inline content.
+
+    Returns: human-readable confirmation text + structured data including file ID.
+    """
+    result = _drive_create(name, content, mime_type, parent_folder_id)
+    summary = f"Created '{name}' ({mime_type}, {len(content)} bytes) in Google Drive. File ID: {result.get('id', '')}"
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent={**result, "message": summary},
+    )
 
 
 @mcp.tool()
-def drive_delete_file(file_id: str) -> dict[str, Any]:
-    """Delete a file from Google Drive by ID. Returns id, status, message."""
-    return _drive_delete(file_id)
+def drive_delete_file(file_id: str) -> CallToolResult:
+    """Delete a file from Google Drive by ID.
+
+    Returns: human-readable confirmation text + structured data including file ID.
+    """
+    result = _drive_delete(file_id)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
 
 
 @mcp.tool()
-def docs_create(title: str, content: str = "") -> dict[str, Any]:
+def docs_create(title: str, content: str = "") -> CallToolResult:
     """Create a new Google Doc.
 
     Parameters:
       title — document title
       content — optional initial text content
 
-    Returns: dict with id, title, url, status, message.
+    Returns: human-readable confirmation text + structured data including document ID.
     """
-    return _docs_create(title, content)
+    result = _docs_create(title, content)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
 
 
 @mcp.tool()
-def docs_update(document_id: str, text: str, location_index: int = 1) -> dict[str, Any]:
+def docs_update(document_id: str, text: str, location_index: int = 1) -> CallToolResult:
     """Insert text into a Google Doc at the specified location.
 
     Parameters:
@@ -323,13 +429,18 @@ def docs_update(document_id: str, text: str, location_index: int = 1) -> dict[st
       text — text to insert
       location_index — insertion index (1 = document start; default 1)
 
-    Returns the batchUpdate response.
+    Returns: human-readable confirmation text + structured data with batchUpdate response.
     """
-    return _docs_update(document_id, text, location_index)
+    result = _docs_update(document_id, text, location_index)
+    summary = f"Inserted {len(text)} characters into Google Doc '{document_id}' at index {location_index}."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent={**result, "message": summary},
+    )
 
 
 @mcp.tool()
-def sheets_update(spreadsheet_id: str, range: str, values: list[list[str]]) -> dict[str, Any]:
+def sheets_update(spreadsheet_id: str, range: str, values: list[list[str]]) -> CallToolResult:
     """Update cell values in a Google Sheet.
 
     Parameters:
@@ -337,13 +448,19 @@ def sheets_update(spreadsheet_id: str, range: str, values: list[list[str]]) -> d
       range — A1 notation range (e.g. 'Sheet1!A1:C3')
       values — 2D array of cell values (row-major)
 
-    Returns: the update response.
+    Returns: human-readable confirmation text + structured data with update response.
     """
-    return _sheets_update(spreadsheet_id, range, values)
+    result = _sheets_update(spreadsheet_id, range, values)
+    updated_cells = result.get("updatedCells", "?")
+    summary = f"Updated {len(values)} row(s) in {len(values[0]) if values else 0} column(s) in Google Sheet '{spreadsheet_id}' at range '{range}'. {updated_cells} cells updated."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent={**result, "message": summary},
+    )
 
 
 @mcp.tool()
-def sheets_append(spreadsheet_id: str, range: str, values: list[list[str]]) -> dict[str, Any]:
+def sheets_append(spreadsheet_id: str, range: str, values: list[list[str]]) -> CallToolResult:
     """Append rows to the end of a Google Sheet.
 
     Parameters:
@@ -351,13 +468,18 @@ def sheets_append(spreadsheet_id: str, range: str, values: list[list[str]]) -> d
       range — A1 notation range, determines which sheet
       values — 2D array of rows to append (row-major)
 
-    Returns: the append response (appendedRange, appendedRows).
+    Returns: human-readable confirmation text + structured data with append response.
     """
-    return _sheets_append(spreadsheet_id, range, values)
+    result = _sheets_append(spreadsheet_id, range, values)
+    summary = f"Appended {len(values)} row(s) to Google Sheet '{spreadsheet_id}' starting at '{range}'."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent={**result, "message": summary},
+    )
 
 
 @mcp.tool()
-def calendar_create_event(calendar_id: str = "primary", summary: str = "", start_time: str = "", end_time: str = "", description: str = "", location: str = "", attendees: list[dict[str, str]] = None) -> dict[str, Any]:
+def calendar_create_event(calendar_id: str = "primary", summary: str = "", start_time: str = "", end_time: str = "", description: str = "", location: str = "", attendees: list[dict[str, str]] = None) -> CallToolResult:
     """Create a calendar event.
 
     Parameters:
@@ -369,13 +491,17 @@ def calendar_create_event(calendar_id: str = "primary", summary: str = "", start
       location — event location (optional)
       attendees — list of {'email': 'addr'} dicts (optional)
 
-    Returns: dict with id, summary, start, end, location, status, htmlLink, message.
+    Returns: human-readable confirmation text + structured data including event ID.
     """
-    return _cal_create(calendar_id, summary, start_time, end_time, description, location, attendees)
+    result = _cal_create(calendar_id, summary, start_time, end_time, description, location, attendees)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
 
 
 @mcp.tool()
-def calendar_update_event(calendar_id: str = "primary", event_id: str = "", summary: str = "", start_time: str = "", end_time: str = "", description: str = "", location: str = "") -> dict[str, Any]:
+def calendar_update_event(calendar_id: str = "primary", event_id: str = "", summary: str = "", start_time: str = "", end_time: str = "", description: str = "", location: str = "") -> CallToolResult:
     """Update a calendar event by ID. Only non-empty fields are sent.
 
     Parameters:
@@ -387,31 +513,46 @@ def calendar_update_event(calendar_id: str = "primary", event_id: str = "", summ
       description — new description (or empty to keep)
       location — new location (or empty to keep)
 
-    Returns: dict with id, updated_fields, status, htmlLink, message.
+    Returns: human-readable confirmation text + structured data including event ID.
     """
-    return _cal_update(calendar_id, event_id, summary, start_time, end_time, description, location)
+    result = _cal_update(calendar_id, event_id, summary, start_time, end_time, description, location)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
 
 
 @mcp.tool()
-def calendar_delete_event(calendar_id: str = "primary", event_id: str = "") -> dict[str, Any]:
-    """Delete a calendar event by ID. Returns id, status, message."""
-    return _cal_delete(calendar_id, event_id)
+def calendar_delete_event(calendar_id: str = "primary", event_id: str = "") -> CallToolResult:
+    """Delete a calendar event by ID.
+
+    Returns: human-readable confirmation text + structured data including event ID.
+    """
+    result = _cal_delete(calendar_id, event_id)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
 
 
 @mcp.tool()
-def slides_create(title: str = "Untitled Presentation") -> dict[str, Any]:
+def slides_create(title: str = "Untitled Presentation") -> CallToolResult:
     """Create a new Google Slides presentation.
 
     Parameters:
       title — presentation title
 
-    Returns: dict with id, title, url, status, message.
+    Returns: human-readable confirmation text + structured data including presentation ID.
     """
-    return _slides_create(title)
+    result = _slides_create(title)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
 
 
 @mcp.tool()
-def slides_update(presentation_id: str, requests_json: str) -> dict[str, Any]:
+def slides_update(presentation_id: str, requests_json: str) -> CallToolResult:
     """Batch update a Google Slides presentation.
 
     Parameters:
@@ -419,9 +560,22 @@ def slides_update(presentation_id: str, requests_json: str) -> dict[str, Any]:
       requests_json — JSON array of Slides API request objects as a string.
         Example: '[{"createSlide": {"slideObjectProperties": {"title": "New Slide"}}}]'
 
-    Returns: the batchUpdate response with replies.
+    Returns: human-readable confirmation text + structured data with replies.
     """
-    return _slides_update(presentation_id, requests_json)
+    result = _slides_update(presentation_id, requests_json)
+    import json as _json
+    try:
+        reqs = _json.loads(requests_json)
+        req_count = len(reqs)
+    except Exception:
+        req_count = "?"
+    reply_count = len(result.get("replies", []))
+    summary = f"Applied {req_count} batch update(s) to Google Slides presentation '{presentation_id}'. {reply_count} reply(ies) returned."
+    result["message"] = summary
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=result,
+    )
 
 
 # ── Scope-based tool filtering ──────────────────────────────────────────────
