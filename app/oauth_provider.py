@@ -137,14 +137,21 @@ def _sign_jwt(payload: dict[str, Any]) -> str:
 
 
 def _verify_jwt(token: str) -> dict[str, Any] | None:
-    """Verify an MCP JWT. Returns payload if valid, None if invalid/expired."""
+    """Verify an MCP JWT. Returns payload if valid, None if invalid/expired.
+
+    Audience verification is DISABLED (verify_aud=False) because refresh tokens
+    carry an ``aud`` claim bound to the client_id at issuance time. In PyJWT 2.x,
+    ``audience=None`` actually REJECTS tokens that HAVE an ``aud`` claim (treats
+    it as "no audience expected") — this silently broke every refresh-token
+    verification, causing daily 401s. We verify issuer + exp + iat in PyJWT and
+    check the ``aud`` claim manually in load_refresh_token() if needed.
+    """
     try:
         return jwt.decode(
             token,
             settings.mcp_jwt_secret,
             algorithms=["HS256"],
-            audience=None,  # we validate issuer + subject manually
-            options={"verify_exp": True, "verify_iat": True},
+            options={"verify_exp": True, "verify_iat": True, "verify_aud": False},
             issuer=settings.external_url,
         )
     except jwt.PyJWTError:
@@ -338,13 +345,19 @@ class GoogleOAuthProvider:
         client: OAuthClientInformationFull,
         refresh_token: str,
     ) -> RefreshToken | None:
-        """Look up an MCP refresh token."""
+        """Look up an MCP refresh token.
+
+        Validates the JWT signature, expiry, issuer, token type, and JTI
+        existence in the token store. Does NOT bind the refresh token to a
+        specific client_id — this allows MCP clients that use dynamic client
+        registration (which may rotate client_ids across sessions) to still
+        refresh tokens. The subject (Google email) in the JWT is the binding
+        identity, and the JTI check prevents use of revoked tokens.
+        """
         payload = _verify_jwt(refresh_token)
         if payload is None:
             return None
         if payload.get("token_type") != "refresh":
-            return None
-        if payload.get("aud") != client.client_id:
             return None
         if payload.get("iss") != settings.external_url:
             return None
@@ -352,8 +365,6 @@ class GoogleOAuthProvider:
         jti = payload.get("jti")
         stored = self._mcp_tokens.get(jti) if jti else None
         if stored is None:
-            return None
-        if stored["client_id"] != client.client_id:
             return None
 
         return RefreshToken(

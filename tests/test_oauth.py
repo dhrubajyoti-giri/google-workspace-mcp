@@ -1,9 +1,18 @@
 """Tests for the OAuth flow: state store management, code exchange, cleanup."""
+import asyncio
 import time
+import pytest
 from unittest.mock import patch, MagicMock
 
 from app.oauth import _google_state_store, _cleanup_stores, _exchange_code, _build_token_data
-from app.oauth_provider import provider, registry
+from app.oauth_provider import (
+    provider,
+    registry,
+    _sign_jwt,
+    _McpTokenStore,
+    GoogleOAuthProvider,
+    RefreshToken,
+)
 
 
 def test_cleanup_stores_removes_expired_entries():
@@ -113,3 +122,48 @@ def test_build_token_data_deduplicates_credentials():
     assert "scopes" not in creds_data
     assert creds_data["token"] == "test_token"
     assert creds_data["refresh_token"] == "test_refresh"
+
+
+# ── Refresh token flow ───────────────────────────────────────────────────────
+
+def test_load_refresh_token_works_across_client_id_rotation():
+    """A refresh token should be loadable even if the MCP client_id changed
+    since issuance (e.g., QwenPaw dynamic client registration rotates
+    client_ids across sessions). Previously, load_refresh_token() rejected
+    refresh tokens when client_id didn't match — causing daily 401s.
+    """
+    from app.config import settings
+
+    # Create a test provider with an in-memory token store (no disk write)
+    test_store = _McpTokenStore(token_file=None)  # None → in-memory only
+    test_provider = GoogleOAuthProvider(registry, None)
+    test_provider._mcp_tokens = test_store
+
+    # Simulate initial issuance with client_id "original_client"
+    now = int(time.time())
+    jti = "test_jti_123"
+    subject = "user@example.com"
+    original_client_id = "original_client"
+    new_client_id = "rotated_client_456"
+
+    refresh_jwt = _sign_jwt({
+        "sub": subject,
+        "aud": original_client_id,
+        "jti": jti,
+        "scope": "openid email",
+        "exp": now + settings.mcp_refresh_token_ttl,
+        "token_type": "refresh",
+    })
+
+    test_store.store(jti, subject=subject, client_id=original_client_id,
+                     scopes=["openid", "email"], expires_at=now + settings.mcp_refresh_token_ttl)
+
+    # Create a client with a DIFFERENT client_id (simulating client rotation)
+    rotated_client = MagicMock()
+    rotated_client.client_id = new_client_id
+
+    # The refresh token should still be valid — client_id should NOT block it
+    result = asyncio.run(test_provider.load_refresh_token(rotated_client, refresh_jwt))
+    assert result is not None, "Refresh token rejected due to client_id mismatch — this was the bug!"
+    assert result.subject == subject
+    assert result.token == refresh_jwt
