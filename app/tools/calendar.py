@@ -131,16 +131,17 @@ def calendar_create_event(
         body["attendees"] = attendees
 
     event = service.events().insert(calendarId=calendar_id, body=body).execute()
-    log.info("Created event '%s' — ID: %s", summary, event["id"])
+    event_id = event.get("id", "")
+    log.info("Created event '%s' — ID: %s", summary, event_id)
     return {
-        "id": event["id"],
+        "id": event_id,
         "summary": event.get("summary", ""),
         "start": event.get("start", {}).get("dateTime", ""),
         "end": event.get("end", {}).get("dateTime", ""),
         "location": event.get("location", ""),
         "status": event.get("status", ""),
         "htmlLink": event.get("htmlLink", ""),
-        "message": f"Event created successfully — '{summary}' (ID: {event['id']})",
+        "message": f"Event created successfully — '{summary}' (ID: {event_id})",
     }
 
 
@@ -182,13 +183,14 @@ def calendar_update_event(
         eventId=event_id,
         body=body,
     ).execute()
+    resp_id = event.get("id", event_id)
     log.info("Updated event %s", event_id)
     return {
-        "id": event["id"],
+        "id": resp_id,
         "updated_fields": updated_fields,
         "status": event.get("status", ""),
         "htmlLink": event.get("htmlLink", ""),
-        "message": f"Event updated successfully — ID: {event['id']} (fields: {', '.join(updated_fields) if updated_fields else 'none'})",
+        "message": f"Event updated successfully — ID: {resp_id} (fields: {', '.join(updated_fields) if updated_fields else 'none'})",
     }
 
 

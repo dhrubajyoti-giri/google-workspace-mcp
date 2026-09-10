@@ -338,3 +338,5 @@ def test_docs_get_extracts_body_text(mock_docs_service):
     assert "Hello world" in result["body"]
     # Heading should be in sections
     assert any(s["text"] == "Introduction" and s["level"] == 1 for s in result["body_sections"])
+    # Verify includeTabsContent=True was passed (required for body content)
+    mock_docs_service.documents().get.assert_called_with(documentId="doc123", includeTabsContent=True)

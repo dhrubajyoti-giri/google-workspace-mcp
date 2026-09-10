@@ -46,13 +46,13 @@ def drive_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
     files = []
     for f in results.get("files", []):
         files.append({
-            "id": f["id"],
+            "id": f.get("id", ""),
             "name": f.get("name", ""),
             "mimeType": f.get("mimeType", ""),
             "size": f.get("size", "0"),
             "modifiedTime": f.get("modifiedTime", ""),
             "owner": f.get("owners", [{}])[0].get("displayName", ""),
-            "webViewLink": f.get("webViewLink", f"https://drive.google.com/file/d/{f['id']}/view"),
+            "webViewLink": f.get("webViewLink", f"https://drive.google.com/file/d/{f.get('id', '')}/view"),
         })
     return files
 
@@ -73,13 +73,13 @@ def drive_get_file(file_id: str) -> dict[str, Any]:
 
     mime = metadata.get("mimeType", "")
     result: dict[str, Any] = {
-        "id": metadata["id"],
+        "id": metadata.get("id", ""),
         "name": metadata.get("name", ""),
         "mimeType": mime,
         "size": metadata.get("size", "0"),
         "modifiedTime": metadata.get("modifiedTime", ""),
         "owner": metadata.get("owners", [{}])[0].get("displayName", ""),
-        "webViewLink": metadata.get("webViewLink", f"https://drive.google.com/file/d/{file_id}/view"),
+        "webViewLink": metadata.get("webViewLink", f"https://drive.google.com/file/d/{metadata.get('id', '')}/view"),
     }
 
     # Export Google Workspace files to plain text
@@ -150,14 +150,14 @@ def drive_upload_file(
         fields="id,name,mimeType,size,webViewLink,modifiedTime",
     ).execute()
 
-    log.info("Uploaded file '%s' to Drive — ID: %s", name, file["id"])
+    log.info("Uploaded file '%s' to Drive — ID: %s", name, file.get("id", ""))
     return {
-        "id": file["id"],
+        "id": file.get("id", ""),
         "name": file.get("name", ""),
         "mimeType": file.get("mimeType", ""),
         "size": file.get("size", "0"),
         "modifiedTime": file.get("modifiedTime", ""),
-        "webViewLink": file.get("webViewLink", f"https://drive.google.com/file/d/{file['id']}/view"),
+        "webViewLink": file.get("webViewLink", f"https://drive.google.com/file/d/{file.get('id', '')}/view"),
     }
 
 

@@ -34,7 +34,7 @@ def docs_get(document_id: str) -> dict[str, Any]:
       - lastUpdated: document update time (if available)
     """
     service = _ensure_auth()
-    doc = service.documents().get(documentId=document_id).execute()
+    doc = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
 
     doc_id = doc.get("documentId", "")
     title = doc.get("title", "")

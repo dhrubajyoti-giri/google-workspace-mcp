@@ -50,14 +50,14 @@ def gmail_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
     for msg in messages:
         msg_detail = service.users().messages().get(
             userId="me",
-            id=msg["id"],
+            id=msg.get("id", ""),
             format="metadata",
             metadataHeaders=["Subject", "From", "Date"],
         ).execute()
 
         headers = {h["name"]: h["value"] for h in msg_detail.get("payload", {}).get("headers", [])}
         out.append({
-            "id": msg_detail["id"],
+            "id": msg_detail.get("id", ""),
             "threadId": msg_detail.get("threadId", ""),
             "subject": headers.get("Subject", ""),
             "from": headers.get("From", ""),
@@ -101,7 +101,7 @@ def gmail_get_message(message_id: str) -> dict[str, Any]:
                 html_body = decoded
 
     return {
-        "id": msg["id"],
+        "id": msg.get("id", ""),
         "threadId": msg.get("threadId", ""),
         "labels": msg.get("labelIds", []),
         "internalDate": msg.get("internalDate", ""),
@@ -197,12 +197,12 @@ def gmail_create_draft(
         userId="me",
         body={"message": {"raw": raw}},
     ).execute()
-
-    log.info("Draft created — draft ID: %s, to: %s", draft["id"], to)
+    draft_id = draft.get("id", "")
+    log.info("Draft created — draft ID: %s, to: %s", draft_id, to)
     return {
-        "id": draft["id"],
+        "id": draft_id,
         "to": to,
         "subject": subject,
         "status": "draft_created",
-        "message": f"Draft created successfully — draft ID: {draft['id']}, to: {to}",
+        "message": f"Draft created successfully — draft ID: {draft_id}, to: {to}",
     }
