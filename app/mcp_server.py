@@ -284,7 +284,7 @@ def sheets_get(spreadsheet_id: str, range: str = "A1:Z100") -> CallToolResult:
 # ── Calendar tools ───────────────────────────────────────────
 
 @mcp.tool()
-def calendar_list_events(calendar_id: str = "primary", time_min: str = None, time_max: str = None, max_results: int = 10) -> CallToolResult:
+def calendar_list_events(calendar_id: str = "primary", time_min: str | None = None, time_max: str | None = None, max_results: int = 10) -> CallToolResult:
     """List events from a Google Calendar.
 
     Parameters:
