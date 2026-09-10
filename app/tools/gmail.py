@@ -55,7 +55,7 @@ def gmail_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
             metadataHeaders=["Subject", "From", "Date"],
         ).execute()
 
-        headers = {h["name"]: h["value"] for h in msg_detail.get("payload", {}).get("headers", [])}
+        headers = {h.get("name", ""): h.get("value", "") for h in msg_detail.get("payload", {}).get("headers", [])}
         out.append({
             "id": msg_detail.get("id", ""),
             "threadId": msg_detail.get("threadId", ""),
@@ -81,7 +81,7 @@ def gmail_get_message(message_id: str) -> dict[str, Any]:
         format="full",
     ).execute()
 
-    headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+    headers = {h.get("name", ""): h.get("value", "") for h in msg.get("payload", {}).get("headers", [])}
 
     # Extract body parts
     text_body = ""

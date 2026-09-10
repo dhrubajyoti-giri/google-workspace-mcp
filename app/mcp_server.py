@@ -543,15 +543,16 @@ def calendar_delete_event(calendar_id: str = "primary", event_id: str = "") -> C
 
 
 @mcp.tool()
-def slides_create(title: str = "Untitled Presentation") -> CallToolResult:
+def slides_create(title: str = "Untitled Presentation", folder_id: str = "") -> CallToolResult:
     """Create a new Google Slides presentation.
 
     Parameters:
       title — presentation title
+      folder_id — Google Drive folder ID to place the presentation in (default: My Drive root)
 
     Returns: human-readable confirmation text + structured data including presentation ID.
     """
-    result = _slides_create(title)
+    result = _slides_create(title, folder_id)
     return CallToolResult(
         content=[TextContent(type="text", text=result["message"])],
         structuredContent=result,

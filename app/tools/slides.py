@@ -65,23 +65,54 @@ def slides_get(presentation_id: str) -> dict[str, Any]:
     }
 
 
-def slides_create(title: str = "Untitled Presentation") -> dict[str, Any]:
+def slides_create(title: str = "Untitled Presentation", folder_id: str = "") -> dict[str, Any]:
     """Create a new Google Slides presentation.
 
     Parameters:
       title — presentation title
+      folder_id — Google Drive folder ID to place the presentation in (default: My Drive root)
 
     Returns: dict with id, title, url, status, message.
     """
-    service = _ensure_auth()
+    client = get_google_client()
+    if not client.has_token():
+        raise RuntimeError("Google authentication required. Complete OAuth via your MCP client.")
+
+    service = client.get_service("slides", "v1")
     pres = service.presentations().create(body={"title": title}).execute()
-    log.info("Created presentation '%s' — ID: %s", title, pres["presentationId"])
+    pres_id = pres.get("presentationId", "")
+    if not pres_id:
+        return {
+            "id": "",
+            "title": title,
+            "url": "",
+            "folder_id": folder_id,
+            "status": "error",
+            "message": f"Failed to create Google Slides — no presentationId in API response",
+        }
+
+    # Move to specified folder if requested (Slides API doesn't support folder placement)
+    if folder_id:
+        drive_service = client.get_service("drive", "v3")
+        drive_service.files().update(
+            fileId=pres_id,
+            addParents=folder_id,
+            removeParents="root",
+            fields="id, parents",
+        ).execute()
+        log.info("Moved presentation '%s' (ID: %s) to folder %s", title, pres_id, folder_id)
+
+    msg = f"Presentation created successfully — '{title}' (ID: {pres_id})"
+    if folder_id:
+        msg += f" in folder {folder_id}"
+    log.info("Created presentation '%s' — ID: %s", title, pres_id)
     return {
-        "id": pres["presentationId"],
+        "id": pres_id,
         "title": title,
-        "url": f"https://docs.google.com/presentation/d/{pres['presentationId']}/edit",
+        "url": f"https://docs.google.com/presentation/d/{pres_id}/edit",
+        "folder_id": folder_id,
         "status": "created",
-        "message": f"Presentation created successfully — '{title}' (ID: {pres['presentationId']})",
+        "message": msg,
     }
 
 

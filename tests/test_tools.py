@@ -340,3 +340,31 @@ def test_docs_get_extracts_body_text(mock_docs_service):
     assert any(s["text"] == "Introduction" and s["level"] == 1 for s in result["body_sections"])
     # Verify includeTabsContent=True was passed (required for body content)
     mock_docs_service.documents().get.assert_called_with(documentId="doc123", includeTabsContent=True)
+
+
+# ── Slides tool tests ───────────────────────────────────────
+
+def test_slides_create_with_folder_id():
+    from app.tools.slides import slides_create
+
+    with patch("app.tools.slides.get_google_client") as mock_client_cls:
+        client = MagicMock()
+        client.has_token.return_value = True
+        slides_svc = MagicMock()
+        drive_svc = MagicMock()
+        client.get_service.side_effect = lambda api, v="v1": slides_svc if api == "slides" else drive_svc
+        mock_client_cls.return_value = client
+
+        slides_svc.presentations().create().execute.return_value = {"presentationId": "pres789"}
+
+        result = slides_create(title="Slides in Folder", folder_id="folder_xyz")
+        assert result["id"] == "pres789"
+        assert result["title"] == "Slides in Folder"
+        assert result["folder_id"] == "folder_xyz"
+        assert "folder_xyz" in result["message"]
+        # Verify Drive API was called to move the presentation to the folder
+        drive_svc.files().update.assert_called_once()
+        update_kwargs = drive_svc.files().update.call_args
+        assert update_kwargs[1]["fileId"] == "pres789"
+        assert update_kwargs[1]["addParents"] == "folder_xyz"
+        assert update_kwargs[1]["removeParents"] == "root"
