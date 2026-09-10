@@ -141,7 +141,7 @@ def gmail_search(query: str, max_results: int = 10) -> CallToolResult:
     summary = f"Found {len(results)} message(s) matching '{query}'." if results else f"No messages found matching '{query}'."
     return CallToolResult(
         content=[TextContent(type="text", text=summary)],
-        structuredContent=results,
+        structuredContent={"messages": results, "query": query, "count": len(results)},
     )
 
 
@@ -199,13 +199,19 @@ def drive_search(query: str, max_results: int = 10) -> CallToolResult:
       - 'modifiedTime > \"2024-01-01T00:00:00\"'
       - 'name contains \"project\" and trashed=false'
 
+    A bare search term (no operators) is auto-wrapped as name contains '<term>'.
+
     Returns: human-readable summary + structured data (list of file metadata).
     """
+    # Auto-wrap bare queries (no Drive API operators) as name contains '...'
+    _OPERATORS = (" contains ", "=", "!=", "<", ">", " in ", " and ", " or ", " not ")
+    if not any(op in query for op in _OPERATORS) and not query.startswith("("):
+        query = f"name contains '{query}'"
     results = _drive_search(query, max_results)
     summary = f"Found {len(results)} file(s) matching '{query}'." if results else f"No files found matching '{query}'."
     return CallToolResult(
         content=[TextContent(type="text", text=summary)],
-        structuredContent=results,
+        structuredContent={"files": results, "query": query, "count": len(results)},
     )
 
 
@@ -293,7 +299,7 @@ def calendar_list_events(calendar_id: str = "primary", time_min: str = None, tim
     summary = f"Found {len(results)} event(s) on calendar '{calendar_id}'." if results else f"No events found on calendar '{calendar_id}'."
     return CallToolResult(
         content=[TextContent(type="text", text=summary)],
-        structuredContent=results,
+        structuredContent={"events": results, "calendar_id": calendar_id, "count": len(results)},
     )
 
 
