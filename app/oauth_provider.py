@@ -16,9 +16,12 @@ Google email, which is used to look up the user's Google credentials.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import secrets
 import time
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -68,11 +71,34 @@ class _AuthRequestStore:
 
 
 class _McpTokenStore:
-    """Stores MCP refresh tokens (mapped to Google email) for revocation + refresh."""
+    """Stores MCP refresh tokens (mapped to Google email) for revocation + refresh.
 
-    def __init__(self):
-        # refresh_token_id → {subject, client_id, scopes, expires_at}
-        self._tokens: dict[str, dict[str, Any]] = {}
+    Persists to disk so refresh tokens survive server restarts.
+    File format: JSON mapping refresh_token_jti → {subject, client_id, scopes, expires_at}
+    """
+
+    def __init__(self, token_file: str | Path | None = None):
+        self._path = Path(token_file) if token_file else None
+        self._tokens: dict[str, dict[str, Any]] = self._load()
+
+    def _load(self) -> dict[str, dict[str, Any]]:
+        if self._path and self._path.exists():
+            try:
+                data = json.loads(self._path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+            except (json.JSONDecodeError, OSError) as e:
+                log.warning("MCP token store corrupted, starting fresh: %s", e)
+        return {}
+
+    def _save(self) -> None:
+        if not self._path:
+            return
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self._tokens, indent=2), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        tmp.replace(self._path)
 
     def store(self, token_id: str, subject: str, client_id: str, scopes: list[str], expires_at: int) -> None:
         self._tokens[token_id] = {
@@ -81,12 +107,14 @@ class _McpTokenStore:
             "scopes": scopes,
             "expires_at": expires_at,
         }
+        self._save()
 
     def get(self, token_id: str) -> dict[str, Any] | None:
         return self._tokens.get(token_id)
 
     def delete(self, token_id: str) -> None:
         self._tokens.pop(token_id, None)
+        self._save()
 
 
 # ── Request-scoped state (for Google OAuth callback coordination) ─────────
@@ -160,10 +188,10 @@ class GoogleOAuthProvider:
     Google credentials in the registry.
     """
 
-    def __init__(self, registry: Registry):
+    def __init__(self, registry: Registry, token_file: str | Path | None = None):
         self._registry = registry
         self._auth_requests = _AuthRequestStore()
-        self._mcp_tokens = _McpTokenStore()
+        self._mcp_tokens = _McpTokenStore(token_file)
         # In-memory auth codes: code_string → AuthorizationCode
         self._auth_codes: dict[str, AuthorizationCode] = {}
         # Registered MCP clients: client_id → OAuthClientInformationFull
@@ -372,7 +400,10 @@ class GoogleOAuthProvider:
             scopes=scopes,
             expires_at=now + settings.mcp_refresh_token_ttl,
         )
-        self._mcp_tokens.delete(refresh_token.token)  # revoke old
+        # Revoke old refresh token (extract JTI from JWT, not the JWT string)
+        old_payload = _verify_jwt(refresh_token.token)
+        if old_payload and old_payload.get("jti"):
+            self._mcp_tokens.delete(old_payload["jti"])
 
         return OAuthToken(
             access_token=access_token,
@@ -465,5 +496,7 @@ class GoogleOAuthProvider:
 # ── Module-level singletons ─────────────────────────────────────────────────
 # Initialized at import time. oauth.py and main.py import these.
 
-registry = Registry(settings.registry_file)
-provider = GoogleOAuthProvider(registry)
+_registry_file = settings.registry_file
+_mcp_tokens_file = str(Path(_registry_file).with_name("mcp_tokens.json"))
+registry = Registry(_registry_file)
+provider = GoogleOAuthProvider(registry, _mcp_tokens_file)
