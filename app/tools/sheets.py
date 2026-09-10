@@ -18,6 +18,60 @@ def _ensure_auth():
     return client.get_service("sheets", "v4")
 
 
+def sheets_create(title: str = "Untitled Spreadsheet", folder_id: str = "") -> dict[str, Any]:
+    """Create a new Google Sheets spreadsheet.
+
+    Parameters:
+      title — spreadsheet title (default: Untitled Spreadsheet)
+      folder_id — Google Drive folder ID to place the spreadsheet in (default: My Drive root)
+
+    Returns: dict with id, title, url, status, message.
+    """
+    client = get_google_client()
+    if not client.has_token():
+        raise RuntimeError("Google authentication required. Complete OAuth via your MCP client.")
+
+    service = client.get_service("sheets", "v4")
+    # Sheets API create takes a Spreadsheet resource with properties.title
+    result = service.spreadsheets().create(
+        body={"properties": {"title": title}},
+    ).execute()
+    sheet_id = result.get("spreadsheetId", "")
+    if not sheet_id:
+        return {
+            "id": "",
+            "title": title,
+            "url": "",
+            "folder_id": folder_id,
+            "status": "error",
+            "message": "Failed to create Google Sheet — no spreadsheetId in API response",
+        }
+
+    # Move to specified folder if requested (Sheets API doesn't support folder placement)
+    if folder_id:
+        drive_service = client.get_service("drive", "v3")
+        drive_service.files().update(
+            fileId=sheet_id,
+            addParents=folder_id,
+            removeParents="root",
+            fields="id, parents",
+        ).execute()
+        log.info("Moved spreadsheet '%s' (ID: %s) to folder %s", title, sheet_id, folder_id)
+
+    msg = f"Spreadsheet created successfully — '{title}' (ID: {sheet_id})"
+    if folder_id:
+        msg += f" in folder {folder_id}"
+    log.info("Created spreadsheet '%s' — ID: %s", title, sheet_id)
+    return {
+        "id": sheet_id,
+        "title": title,
+        "url": result.get("spreadsheetUrl", f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"),
+        "folder_id": folder_id,
+        "status": "created",
+        "message": msg,
+    }
+
+
 def sheets_get(spreadsheet_id: str, range: str = "A1:Z100") -> dict[str, Any]:
     """Retrieve values from a Google Sheets spreadsheet.
 

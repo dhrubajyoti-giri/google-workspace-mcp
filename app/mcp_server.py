@@ -19,7 +19,7 @@ from app.config import settings
 from app.tools.gmail import gmail_search as _gmail_search, gmail_get_message as _gmail_get, gmail_send as _gmail_send, gmail_create_draft as _gmail_create_draft
 from app.tools.drive import drive_search as _drive_search, drive_get_file as _drive_get, drive_upload_file as _drive_upload, drive_create_file as _drive_create, drive_delete_file as _drive_delete
 from app.tools.docs import docs_get as _docs_get, docs_create as _docs_create, docs_update as _docs_update
-from app.tools.sheets import sheets_get as _sheets_get, sheets_update as _sheets_update, sheets_append as _sheets_append
+from app.tools.sheets import sheets_get as _sheets_get, sheets_create as _sheets_create, sheets_update as _sheets_update, sheets_append as _sheets_append
 from app.tools.calendar import calendar_list_events as _cal_list, calendar_get_event as _cal_get, calendar_create_event as _cal_create, calendar_update_event as _cal_update, calendar_delete_event as _cal_delete
 from app.tools.slides import slides_get as _slides_get, slides_create as _slides_create, slides_update as _slides_update
 
@@ -53,6 +53,7 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, list[str]] = {
     "docs_update": ["documents"],
     # Sheets — read tools need spreadsheets.readonly; write tools need spreadsheets
     "sheets_get":    ["spreadsheets.readonly", "spreadsheets"],
+    "sheets_create": ["spreadsheets"],
     "sheets_update": ["spreadsheets"],
     "sheets_append": ["spreadsheets"],
     # Calendar — read tools need calendar.readonly; write tools need calendar
@@ -258,6 +259,23 @@ def docs_get(document_id: str) -> CallToolResult:
 
 
 # ── Sheets tools ─────────────────────────────────────────────
+
+@mcp.tool()
+def sheets_create(title: str = "Untitled Spreadsheet", folder_id: str = "") -> CallToolResult:
+    """Create a new Google Sheets spreadsheet.
+
+    Parameters:
+      title — spreadsheet title (default: Untitled Spreadsheet)
+      folder_id — Google Drive folder ID to place the spreadsheet in (default: My Drive root)
+
+    Returns: human-readable confirmation text + structured data including spreadsheet ID.
+    """
+    result = _sheets_create(title, folder_id)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
+
 
 @mcp.tool()
 def sheets_get(spreadsheet_id: str, range: str = "A1:Z100") -> CallToolResult:

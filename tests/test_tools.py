@@ -229,6 +229,35 @@ def test_docs_create_with_folder_id():
         assert update_kwargs[1]["removeParents"] == "root"
 
 
+def test_sheets_create_with_folder_id():
+    from app.tools.sheets import sheets_create
+
+    with patch("app.tools.sheets.get_google_client") as mock_client_cls:
+        client = MagicMock()
+        client.has_token.return_value = True
+        sheets_svc = MagicMock()
+        drive_svc = MagicMock()
+        client.get_service.side_effect = lambda api, v="v1": sheets_svc if api == "sheets" else drive_svc
+        mock_client_cls.return_value = client
+
+        sheets_svc.spreadsheets().create().execute.return_value = {
+            "spreadsheetId": "sheet789",
+            "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/sheet789/edit",
+        }
+
+        result = sheets_create(title="Sheet in Folder", folder_id="folder_xyz")
+        assert result["id"] == "sheet789"
+        assert result["title"] == "Sheet in Folder"
+        assert result["folder_id"] == "folder_xyz"
+        assert "folder_xyz" in result["message"]
+        # Verify Drive API was called to move the spreadsheet
+        drive_svc.files().update.assert_called_once()
+        update_kwargs = drive_svc.files().update.call_args
+        assert update_kwargs[1]["fileId"] == "sheet789"
+        assert update_kwargs[1]["addParents"] == "folder_xyz"
+        assert update_kwargs[1]["removeParents"] == "root"
+
+
 def test_sheets_update():
     from app.tools.sheets import sheets_update
 
