@@ -117,15 +117,15 @@ def test_drive_search_returns_files(mock_drive_service):
 
     mock_drive_service.files().list(
         q="name contains test", pageSize=10,
-        fields="files(id,name,mimeType,size,modifiedTime,owners/displayName,link)"
+        fields="files(id,name,mimeType,size,modifiedTime,owners/displayName,webViewLink)"
     ).execute.return_value = {
         "files": [
             {"id": "f1", "name": "test.txt", "mimeType": "text/plain",
              "size": "1024", "modifiedTime": "2024-01-01",
-             "owners": [{"displayName": "tester"}], "link": "https://drive.google.com/file/d/f1/view"},
+             "owners": [{"displayName": "tester"}], "webViewLink": "https://drive.google.com/file/d/f1/view"},
             {"id": "f2", "name": "data.csv", "mimeType": "text/csv",
              "size": "2048", "modifiedTime": "2024-01-02",
-             "owners": [{"displayName": "tester"}], "link": "https://drive.google.com/file/d/f2/view"},
+             "owners": [{"displayName": "tester"}], "webViewLink": "https://drive.google.com/file/d/f2/view"},
         ]
     }
 
@@ -133,7 +133,9 @@ def test_drive_search_returns_files(mock_drive_service):
     assert len(results) == 2
     assert results[0]["id"] == "f1"
     assert results[0]["name"] == "test.txt"
+    assert results[0]["webViewLink"] == "https://drive.google.com/file/d/f1/view"
     assert results[1]["owner"] == "tester"
+    assert results[1]["webViewLink"] == "https://drive.google.com/file/d/f2/view"
 
 
 # ── Write tool tests ────────────────────────────────────────

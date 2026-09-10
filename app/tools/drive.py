@@ -40,7 +40,7 @@ def drive_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
     results = service.files().list(
         q=query,
         pageSize=max_results,
-        fields="files(id,name,mimeType,size,modifiedTime,owners/displayName,link)",
+        fields="files(id,name,mimeType,size,modifiedTime,owners/displayName,webViewLink)",
     ).execute()
 
     files = []
@@ -52,7 +52,7 @@ def drive_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
             "size": f.get("size", "0"),
             "modifiedTime": f.get("modifiedTime", ""),
             "owner": f.get("owners", [{}])[0].get("displayName", ""),
-            "webViewLink": f.get("link", f"https://drive.google.com/file/d/{f['id']}/view"),
+            "webViewLink": f.get("webViewLink", f"https://drive.google.com/file/d/{f['id']}/view"),
         })
     return files
 
