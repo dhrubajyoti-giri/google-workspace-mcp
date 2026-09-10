@@ -202,6 +202,33 @@ def test_docs_create(mock_docs_service):
     assert result["status"] == "created"
 
 
+def test_docs_create_with_folder_id():
+    from app.tools.docs import docs_create
+
+    with patch("app.tools.docs.get_google_client") as mock_client_cls:
+        client = MagicMock()
+        client.has_token.return_value = True
+        docs_service = MagicMock()
+        drive_service = MagicMock()
+        client.get_service.side_effect = lambda api, v="v1": docs_service if api == "docs" else drive_service
+        mock_client_cls.return_value = client
+
+        docs_service.documents().create().execute.return_value = {"documentId": "doc789"}
+        docs_service.documents().batchUpdate().execute.return_value = {"documentId": "doc789"}
+
+        result = docs_create(title="Folder Doc", content="Hello", folder_id="folder_abc")
+        assert result["id"] == "doc789"
+        assert result["title"] == "Folder Doc"
+        assert result["folder_id"] == "folder_abc"
+        assert "folder_abc" in result["message"]
+        # Verify Drive API was called to move the doc
+        drive_service.files().update.assert_called_once()
+        update_kwargs = drive_service.files().update.call_args
+        assert update_kwargs[1]["fileId"] == "doc789"
+        assert update_kwargs[1]["addParents"] == "folder_abc"
+        assert update_kwargs[1]["removeParents"] == "root"
+
+
 def test_sheets_update():
     from app.tools.sheets import sheets_update
 

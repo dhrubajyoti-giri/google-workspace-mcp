@@ -127,29 +127,58 @@ def docs_get(document_id: str) -> dict[str, Any]:
     }
 
 
-def docs_create(title: str, content: str = "") -> dict[str, Any]:
+def docs_create(title: str, content: str = "", folder_id: str = "") -> dict[str, Any]:
     """Create a new Google Doc.
 
     Parameters:
       title — document title
       content — optional initial text content (inserted after creation)
+      folder_id — Google Drive folder ID to place the doc in (default: My Drive root)
 
     Returns: dict with id, title, url, status, message.
     """
-    service = _ensure_auth()
+    client = get_google_client()
+    if not client.has_token():
+        raise RuntimeError("Google authentication required. Complete OAuth via your MCP client.")
+
+    service = client.get_service("docs", "v1")
     doc = service.documents().create(body={"title": title}, fields="documentId").execute()
-    doc_id = doc["documentId"]
+    doc_id = doc.get("documentId", "")
+    if not doc_id:
+        return {
+            "id": "",
+            "title": title,
+            "url": "",
+            "folder_id": folder_id,
+            "status": "error",
+            "message": f"Failed to create Google Doc — no documentId in API response",
+        }
+
+    # Move to specified folder if requested (Docs API doesn't support folder placement)
+    if folder_id:
+        drive_service = client.get_service("drive", "v3")
+        drive_service.files().update(
+            fileId=doc_id,
+            addParents=folder_id,
+            removeParents="root",
+            fields="id, parents",
+        ).execute()
+        log.info("Moved Google Doc '%s' (ID: %s) to folder %s", title, doc_id, folder_id)
 
     if content:
         docs_update(doc_id, content)
 
     log.info("Created Google Doc '%s' — ID: %s", title, doc_id)
+    msg = f"Google Doc created successfully — '{title}' (ID: {doc_id})"
+    if folder_id:
+        msg += f" in folder {folder_id}"
     return {
         "id": doc_id,
         "title": title,
         "url": f"https://docs.google.com/document/d/{doc_id}/edit",
+        "folder_id": folder_id,
         "status": "created",
-        "message": f"Google Doc created successfully — '{title}' (ID: {doc_id})",
+        "message": msg,
     }
 
 

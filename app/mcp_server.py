@@ -410,16 +410,17 @@ def drive_delete_file(file_id: str) -> CallToolResult:
 
 
 @mcp.tool()
-def docs_create(title: str, content: str = "") -> CallToolResult:
+def docs_create(title: str, content: str = "", folder_id: str = "") -> CallToolResult:
     """Create a new Google Doc.
 
     Parameters:
       title — document title
-      content — optional initial text content
+      content — optional initial text content (inserted after creation)
+      folder_id — Google Drive folder ID to place the doc in (default: My Drive root)
 
     Returns: human-readable confirmation text + structured data including document ID.
     """
-    result = _docs_create(title, content)
+    result = _docs_create(title, content, folder_id)
     return CallToolResult(
         content=[TextContent(type="text", text=result["message"])],
         structuredContent=result,

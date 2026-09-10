@@ -148,9 +148,10 @@ def gmail_send(
         body={"raw": raw},
     ).execute()
 
-    log.info("Sent email to %s — message ID: %s", to, sent["id"])
+    log.info("Sent email to %s — message ID: %s", to, sent.get("id", ""))
+    msg_id = sent.get("id", "")
     return {
-        "id": sent["id"],
+        "id": msg_id,
         "threadId": sent.get("threadId", ""),
         "labelIds": sent.get("labelIds", []),
         "to": to,
@@ -158,7 +159,7 @@ def gmail_send(
         "cc": cc,
         "bcc": bcc,
         "status": "sent",
-        "message": f"Email sent successfully to {to} — message ID: {sent['id']}",
+        "message": f"Email sent successfully to {to} — message ID: {msg_id}",
     }
 
 
