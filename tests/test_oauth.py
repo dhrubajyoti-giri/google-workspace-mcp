@@ -126,6 +126,106 @@ def test_build_token_data_deduplicates_credentials():
 
 # ── Refresh token flow ───────────────────────────────────────────────────────
 
+# ── Token Store Re-authorization Cleanup ────────────────────────────────────
+
+def test_re_authorization_does_not_create_duplicate_jtis():
+    """When a user re-authorizes, exchange_authorization_code should remove
+    old MCP refresh token JTIs for the same subject+client before storing
+    the new one. Without this cleanup, duplicate entries accumulate in
+    mcp_tokens.json on every re-auth.
+    """
+    import asyncio
+    from app.config import settings
+    from unittest.mock import MagicMock
+
+    test_store = _McpTokenStore(token_file=None)  # in-memory only
+    test_provider = GoogleOAuthProvider(registry, None)
+    test_provider._mcp_tokens = test_store
+
+    subject = "user@example.com"
+    client_id = "mcp_client_1"
+    now = int(time.time())
+    ttl = settings.mcp_refresh_token_ttl
+
+    # Simulate an existing token (from prior authorization)
+    old_jti = "old_jti"
+    test_store.store(old_jti, subject=subject, client_id=client_id,
+                     scopes=["openid", "email"], expires_at=now + ttl)
+    assert old_jti in test_store._tokens
+
+    # Create an auth code for re-authorization
+    auth_code = MagicMock()
+    auth_code.subject = subject
+    auth_code.scopes = ["openid", "email"]
+    auth_code.code = "test_code"
+    auth_code.client_id = client_id
+    auth_code.code_challenge = ""
+    auth_code.redirect_uri = None
+    auth_code.redirect_uri_provided_explicitly = True
+    auth_code.resource = None
+    auth_code.expires_at = now + 600
+
+    mock_client = MagicMock()
+    mock_client.client_id = client_id
+
+    result = asyncio.run(test_provider.exchange_authorization_code(mock_client, auth_code))
+
+    # Old JTI should be gone
+    assert old_jti not in test_store._tokens, "Old JTI not cleaned up on re-authorization!"
+    # New JTI should exist
+    new_jtis = [k for k, v in test_store._tokens.items() if v.get("subject") == subject]
+    assert len(new_jtis) == 1, "Expected exactly 1 active token after re-auth, got %d" % len(new_jtis)
+    # New token should have a different JTI
+    assert new_jtis[0] != old_jti
+
+
+def test_re_authorization_preserves_other_clients_tokens():
+    """Re-authorizing with client A should NOT delete client B's tokens
+    for the same user.
+    """
+    import asyncio
+    from app.config import settings
+    from unittest.mock import MagicMock
+
+    test_store = _McpTokenStore(token_file=None)
+    test_provider = GoogleOAuthProvider(registry, None)
+    test_provider._mcp_tokens = test_store
+
+    subject = "user@example.com"
+    now = int(time.time())
+    ttl = settings.mcp_refresh_token_ttl
+
+    # Token for client A (the one being re-authorized)
+    test_store.store("jti_a", subject=subject, client_id="client_a",
+                     scopes=["openid"], expires_at=now + ttl)
+    # Token for client B (different client, same user — should be preserved)
+    test_store.store("jti_b", subject=subject, client_id="client_b",
+                     scopes=["openid"], expires_at=now + ttl)
+
+    auth_code = MagicMock()
+    auth_code.subject = subject
+    auth_code.scopes = ["openid"]
+    auth_code.code = "test_code"
+    auth_code.client_id = "client_a"
+    auth_code.code_challenge = ""
+    auth_code.redirect_uri = None
+    auth_code.redirect_uri_provided_explicitly = True
+    auth_code.resource = None
+    auth_code.expires_at = now + 600
+
+    mock_client = MagicMock()
+    mock_client.client_id = "client_a"
+
+    asyncio.run(test_provider.exchange_authorization_code(mock_client, auth_code))
+
+    # Client A's old token should be replaced
+    assert "jti_a" not in test_store._tokens
+    a_tokens = [k for k, v in test_store._tokens.items() if v.get("client_id") == "client_a"]
+    assert len(a_tokens) == 1
+    # Client B's token should still be there
+    assert "jti_b" in test_store._tokens
+
+
 def test_load_refresh_token_works_across_client_id_rotation():
     """A refresh token should be loadable even if the MCP client_id changed
     since issuance (e.g., QwenPaw dynamic client registration rotates

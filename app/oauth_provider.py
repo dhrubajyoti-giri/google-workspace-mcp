@@ -148,6 +148,50 @@ class _McpTokenStore:
         }
         self._save()
 
+    def delete_by_subject(self, subject: str) -> int:
+        """Delete all tokens for a given subject (user email).
+
+        Called during re-authorization to prevent duplicate JTI entries
+        in ``mcp_tokens.json``. When a user re-authorizes with a specific
+        MCP client, the old refresh token JTI for that user+client combo
+        is removed so it can't accumulate indefinitely.
+
+        Returns the number of deleted entries.
+        """
+        to_delete = [
+            k for k, v in self._tokens.items()
+            if v.get("subject") == subject
+        ]
+        for k in to_delete:
+            del self._tokens[k]
+        if to_delete:
+            log.info("Deleted %d old MCP token(s) for subject %s (re-authorization)",
+                     len(to_delete), subject)
+            self._save()
+        return len(to_delete)
+
+    def delete_by_subject_and_client(self, subject: str, client_id: str) -> int:
+        """Delete all tokens for a given subject AND client_id.
+
+        More targeted than ``delete_by_subject`` — only removes tokens
+        issued to the same user+client combination, preserving tokens
+        that other MCP clients (e.g. Claude Desktop vs QwenPaw) may
+        have for the same user.
+
+        Returns the number of deleted entries.
+        """
+        to_delete = [
+            k for k, v in self._tokens.items()
+            if v.get("subject") == subject and v.get("client_id") == client_id
+        ]
+        for k in to_delete:
+            del self._tokens[k]
+        if to_delete:
+            log.info("Deleted %d old MCP token(s) for subject %s / client %s (re-authorization)",
+                     len(to_delete), subject, client_id)
+            self._save()
+        return len(to_delete)
+
     def get(self, token_id: str) -> dict[str, Any] | None:
         return self._tokens.get(token_id)
 
@@ -356,6 +400,9 @@ class GoogleOAuthProvider:
         })
 
         # Store refresh token for verification/revocation
+        # Clean up old refresh tokens for this user+client first (prevents
+        # duplicate JTI accumulation during re-authorization)
+        self._mcp_tokens.delete_by_subject_and_client(subject, client.client_id)
         self._mcp_tokens.store(
             refresh_jti,
             subject=subject,
