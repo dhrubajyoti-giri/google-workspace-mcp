@@ -103,19 +103,27 @@ def calendar_create_event(
     description: str = "",
     location: str = "",
     attendees: list[dict[str, str]] = None,
+    recurrence: list[str] = None,
+    reminders: list[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create a calendar event.
 
     Parameters:
       calendar_id — 'primary' (default) or calendar ID
       summary — event title
-      start_time — ISO 8601 start (e.g. '2024-01-15T14:00:00+05:30')
+      start_time — ISO 8601 start (e.g. '2024-06-01T14:00:00+05:30')
       end_time — ISO 8601 end time
       description — event description (optional)
       location — event location (optional)
       attendees — list of {'email': 'addr'} dicts (optional)
+      recurrence — list of RRULE strings, e.g. ['RRULE:FREQ=HOURLY;INTERVAL=1']
+        Google supports FREQ=SECONDLY/MINUTELY/HOURLY/DAILY/WEEKLY/MONTHLY/YEARLY
+        with INTERVAL, BYDAY, UNTIL, COUNT, etc.
+      reminders — list of reminder overrides, each {'method': 'popup'|'email', 'minutes': N}.
+        E.g. [{'method': 'popup', 'minutes': 5}] sends a popup 5 min before start.
+        Max 5 overrides. Minutes range 0–40320 (4 weeks).
 
-    Returns: dict with id, summary, start, end, location, status, htmlLink, message.
+    Returns: dict with id, summary, start, end, location, status, recurrence, htmlLink, message.
     """
     service = _ensure_auth()
     body: dict[str, Any] = {
@@ -129,6 +137,10 @@ def calendar_create_event(
         body["location"] = location
     if attendees:
         body["attendees"] = attendees
+    if recurrence:
+        body["recurrence"] = recurrence
+    if reminders:
+        body["reminders"] = {"useDefault": False, "overrides": reminders}
 
     event = service.events().insert(calendarId=calendar_id, body=body).execute()
     event_id = event.get("id", "")
@@ -140,6 +152,8 @@ def calendar_create_event(
         "end": event.get("end", {}).get("dateTime", ""),
         "location": event.get("location", ""),
         "status": event.get("status", ""),
+        "recurrence": event.get("recurrence", []),
+        "reminders": event.get("reminders", {}),
         "htmlLink": event.get("htmlLink", ""),
         "message": f"Event created successfully — '{summary}' (ID: {event_id})",
     }
@@ -153,10 +167,24 @@ def calendar_update_event(
     end_time: str = "",
     description: str = "",
     location: str = "",
+    recurrence: list[str] = None,
+    reminders: list[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Update a calendar event by ID.
 
     Only non-empty fields are sent in the patch.
+    Parameters:
+      calendar_id — 'primary' (default) or calendar ID
+      event_id — the event to update
+      summary — new title (leave empty to keep current)
+      start_time — new ISO 8601 start (leave empty to keep)
+      end_time — new ISO 8601 end (leave empty to keep)
+      description — new description (leave empty to keep)
+      location — new location (leave empty to keep)
+      recurrence — list of RRULE strings to set (leave empty to keep)
+      reminders — list of {'method': 'popup'|'email', 'minutes': N} overrides
+        (leave empty to keep current)
+
     Returns: dict with id, updated_fields, status, message.
     """
     service = _ensure_auth()
@@ -177,6 +205,12 @@ def calendar_update_event(
     if location:
         body["location"] = location
         updated_fields.append("location")
+    if recurrence:
+        body["recurrence"] = recurrence
+        updated_fields.append("recurrence")
+    if reminders:
+        body["reminders"] = {"useDefault": False, "overrides": reminders}
+        updated_fields.append("reminders")
 
     event = service.events().update(
         calendarId=calendar_id,

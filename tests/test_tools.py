@@ -583,6 +583,83 @@ def test_calendar_create_event():
         assert event["status"] == "confirmed"
 
 
+def test_calendar_create_event_with_recurrence_and_reminders():
+    from app.tools.calendar import calendar_create_event
+
+    with patch("app.tools.calendar.get_google_client") as mock_client_cls:
+        client = MagicMock()
+        client.has_token.return_value = True
+        service = MagicMock()
+        client.get_service.return_value = service
+        mock_client_cls.return_value = client
+
+        service.events().insert().execute.return_value = {
+            "id": "event_rec_rem",
+            "summary": "Stand up",
+            "status": "confirmed",
+            "recurrence": ["RRULE:FREQ=HOURLY;INTERVAL=1"],
+            "reminders": {"useDefault": False,
+                          "overrides": [{"method": "popup", "minutes": 5}]},
+        }
+
+        event = calendar_create_event(
+            summary="Stand up",
+            start_time="2026-09-12T09:00:00+05:30",
+            end_time="2026-09-12T09:05:00+05:30",
+            recurrence=["RRULE:FREQ=HOURLY;INTERVAL=1"],
+            reminders=[{"method": "popup", "minutes": 5}],
+        )
+        assert event["id"] == "event_rec_rem"
+        assert event["summary"] == "Stand up"
+        assert event["recurrence"] == ["RRULE:FREQ=HOURLY;INTERVAL=1"]
+
+        # Verify the body passed to events().insert() includes recurrence + reminders
+        call_kwargs = service.events().insert.call_args.kwargs
+        body = call_kwargs["body"]
+        assert body["recurrence"] == ["RRULE:FREQ=HOURLY;INTERVAL=1"]
+        assert body["reminders"] == {
+            "useDefault": False,
+            "overrides": [{"method": "popup", "minutes": 5}],
+        }
+
+
+def test_calendar_update_event_with_recurrence_and_reminders():
+    from app.tools.calendar import calendar_update_event
+
+    with patch("app.tools.calendar.get_google_client") as mock_client_cls:
+        client = MagicMock()
+        client.has_token.return_value = True
+        service = MagicMock()
+        client.get_service.return_value = service
+        mock_client_cls.return_value = client
+
+        service.events().update().execute.return_value = {
+            "id": "event_42",
+            "summary": "Updated Event",
+            "status": "confirmed",
+        }
+
+        result = calendar_update_event(
+            event_id="event_42",
+            summary="Updated Event",
+            start_time="2026-09-12T10:00:00+05:30",
+            end_time="2026-09-12T10:05:00+05:30",
+            recurrence=["RRULE:FREQ=DAILY;COUNT=5"],
+            reminders=[{"method": "popup", "minutes": 10}],
+        )
+        assert result["id"] == "event_42"
+        assert "recurrence" in result["updated_fields"]
+        assert "reminders" in result["updated_fields"]
+
+        call_kwargs = service.events().update.call_args.kwargs
+        body = call_kwargs["body"]
+        assert body["recurrence"] == ["RRULE:FREQ=DAILY;COUNT=5"]
+        assert body["reminders"] == {
+            "useDefault": False,
+            "overrides": [{"method": "popup", "minutes": 10}],
+        }
+
+
 def test_calendar_delete_event():
     from app.tools.calendar import calendar_delete_event
 

@@ -527,7 +527,7 @@ def sheets_append(spreadsheet_id: str, range: str, values: list[list[str]]) -> C
 
 
 @mcp.tool()
-def calendar_create_event(calendar_id: str = "primary", summary: str = "", start_time: str = "", end_time: str = "", description: str = "", location: str = "", attendees: list[dict[str, str]] = None) -> CallToolResult:
+def calendar_create_event(calendar_id: str = "primary", summary: str = "", start_time: str = "", end_time: str = "", description: str = "", location: str = "", attendees: list[dict[str, str]] = None, recurrence: list[str] = None, reminders: list[dict[str, Any]] = None) -> CallToolResult:
     """Create a calendar event.
 
     Parameters:
@@ -538,10 +538,12 @@ def calendar_create_event(calendar_id: str = "primary", summary: str = "", start
       description — event description (optional)
       location — event location (optional)
       attendees — list of {'email': 'addr'} dicts (optional)
+      recurrence — list of RRULE strings, e.g. ['RRULE:FREQ=HOURLY;INTERVAL=1']
+      reminders — list of {'method': 'popup'|'email', 'minutes': N} overrides (optional)
 
     Returns: human-readable confirmation text + structured data including event ID.
     """
-    result = _cal_create(calendar_id, summary, start_time, end_time, description, location, attendees)
+    result = _cal_create(calendar_id, summary, start_time, end_time, description, location, attendees, recurrence, reminders)
     return CallToolResult(
         content=[TextContent(type="text", text=result["message"])],
         structuredContent=result,
@@ -549,7 +551,7 @@ def calendar_create_event(calendar_id: str = "primary", summary: str = "", start
 
 
 @mcp.tool()
-def calendar_update_event(calendar_id: str = "primary", event_id: str = "", summary: str = "", start_time: str = "", end_time: str = "", description: str = "", location: str = "") -> CallToolResult:
+def calendar_update_event(calendar_id: str = "primary", event_id: str = "", summary: str = "", start_time: str = "", end_time: str = "", description: str = "", location: str = "", recurrence: list[str] = None, reminders: list[dict[str, Any]] = None) -> CallToolResult:
     """Update a calendar event by ID. Only non-empty fields are sent.
 
     Parameters:
@@ -560,10 +562,12 @@ def calendar_update_event(calendar_id: str = "primary", event_id: str = "", summ
       end_time — new ISO 8601 end (or empty to keep)
       description — new description (or empty to keep)
       location — new location (or empty to keep)
+      recurrence — list of RRULE strings to set (leave empty to keep)
+      reminders — list of {'method': 'popup'|'email', 'minutes': N} overrides (leave empty to keep)
 
     Returns: human-readable confirmation text + structured data including event ID.
     """
-    result = _cal_update(calendar_id, event_id, summary, start_time, end_time, description, location)
+    result = _cal_update(calendar_id, event_id, summary, start_time, end_time, description, location, recurrence, reminders)
     return CallToolResult(
         content=[TextContent(type="text", text=result["message"])],
         structuredContent=result,
