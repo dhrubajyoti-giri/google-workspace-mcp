@@ -21,6 +21,9 @@ def _ensure_auth():
 def tasks_list_lists() -> list[dict[str, Any]]:
     """List all Google Tasks task lists.
 
+    Parameters:
+      (none)
+
     Returns a list of task lists with: id, title, kind, etc.
     """
     service = _ensure_auth()
@@ -35,6 +38,8 @@ def tasks_get_list(list_id: str = "@default") -> dict[str, Any]:
 
     Parameters:
       list_id — the task list ID (or '@default' for the default list)
+
+    Returns a dict with: id, title, kind, selfLink.
     """
     service = _ensure_auth()
     result = service.tasklists().get(tasklist=list_id).execute()
@@ -51,6 +56,8 @@ def tasks_create_list(title: str = "") -> dict[str, Any]:
 
     Parameters:
       title — the title of the new task list
+
+    Returns a dict with: id, title, kind, selfLink, message.
     """
     service = _ensure_auth()
     body = {"title": title}
@@ -71,6 +78,8 @@ def tasks_delete_list(list_id: str = "") -> dict[str, Any]:
 
     Parameters:
       list_id — the task list ID to delete
+
+    Returns a dict with: id, status, message.
     """
     service = _ensure_auth()
     service.tasklists().delete(tasklist=list_id).execute()
@@ -138,6 +147,8 @@ def tasks_get_task(list_id: str = "@default", task_id: str = "") -> dict[str, An
     Parameters:
       list_id — the task list ID
       task_id — the task ID
+
+    Returns a dict with: id, title, status, notes, due, completed, etc.
     """
     service = _ensure_auth()
     task = service.tasks().get(tasklist=list_id, task=task_id).execute()
@@ -172,7 +183,7 @@ def tasks_create_task(
       due — due date as RFC 3339 timestamp (e.g. '2024-01-15T14:00:00.000Z')
       completed — if set, marks task as complete with this timestamp
 
-    Returns: dict with id, title, status, message.
+    Returns a dict with: id, title, status, list_id, message.
     """
     service = _ensure_auth()
     body: dict[str, Any] = {"title": title}
@@ -217,7 +228,7 @@ def tasks_update_task(
       completed — timestamp to mark as complete (empty string clears it → sets status to 'needsAction')
       deleted — if True, deletes the task
 
-    Returns: dict with id, title, updated_fields, message.
+    Returns a dict with: id, title, list_id, updated_fields, message.
     """
     service = _ensure_auth()
     body: dict[str, Any] = {}
@@ -265,6 +276,8 @@ def tasks_delete_task(list_id: str = "@default", task_id: str = "") -> dict[str,
     Parameters:
       list_id — the task list ID
       task_id — the task ID to delete
+
+    Returns a dict with: id, list_id, status, message.
     """
     service = _ensure_auth()
     service.tasks().delete(tasklist=list_id, task=task_id).execute()
@@ -283,6 +296,8 @@ def tasks_complete_task(list_id: str = "@default", task_id: str = "") -> dict[st
     Parameters:
       list_id — the task list ID
       task_id — the task ID to complete
+
+    Returns a dict with: id, title, status, message.
     """
     result = tasks_update_task(
         list_id=list_id,
