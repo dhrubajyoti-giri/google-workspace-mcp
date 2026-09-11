@@ -32,6 +32,19 @@ except ImportError:
 log = logging.getLogger("google-workspace-mcp")
 
 
+def _to_local_iso(dt: datetime | None) -> str | None:
+    """Convert a datetime to Asia/Kolkata ISO string (uses settings.tz)."""
+    if dt is None:
+        return None
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(settings.tz)
+    if dt.tzinfo is None:
+        # Assume UTC if no tzinfo (Google API returns UTC)
+        from datetime import timezone as dt_tz
+        dt = dt.replace(tzinfo=dt_tz.utc)
+    return dt.astimezone(tz).isoformat()
+
+
 class GoogleClient:
     """Per-user credential manager + service factory.
 
@@ -133,7 +146,7 @@ def _persist_updated_token(email: str, creds: Credentials) -> None:
         "token": creds.token,
         "refresh_token": creds.refresh_token,
         "token_uri": creds.token_uri,
-        "expiry": creds.expiry.isoformat() if creds.expiry else None,
+        "expiry": _to_local_iso(creds.expiry) if creds.expiry else None,
     }, _registry.get_scopes(email) or settings.default_scopes)
 
 

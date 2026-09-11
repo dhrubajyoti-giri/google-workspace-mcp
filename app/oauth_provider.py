@@ -75,11 +75,15 @@ class _McpTokenStore:
 
     Persists to disk so refresh tokens survive server restarts.
     File format: JSON mapping refresh_token_jti → {subject, client_id, scopes, expires_at}
+    ``expires_at`` is stored as an ISO-8601 string in the configured local timezone
+    (``settings.tz``, e.g. Asia/Kolkata).
     """
 
     def __init__(self, token_file: str | Path | None = None):
         self._path = Path(token_file) if token_file else None
         self._tokens: dict[str, dict[str, Any]] = self._load()
+        # Purge expired entries on load so stale tokens don't accumulate
+        self._cleanup_expired()
 
     def _load(self) -> dict[str, dict[str, Any]]:
         if self._path and self._path.exists():
@@ -95,17 +99,52 @@ class _McpTokenStore:
         if not self._path:
             return
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(self._tokens, indent=2), encoding="utf-8")
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._tokens, indent=2, sort_keys=True), encoding="utf-8")
         os.chmod(tmp, 0o600)
         tmp.replace(self._path)
+
+    @staticmethod
+    def _expires_at_to_iso(expires_at: int) -> str:
+        """Convert a Unix-seconds expiry to a human-readable local-time ISO string."""
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+        return dt.astimezone(ZoneInfo(settings.tz)).isoformat()
+
+    def _cleanup_expired(self) -> None:
+        """Remove entries whose expiry is in the past.
+
+        Handles both the old Unix-timestamp format (int/float) and the new
+        ISO-string format that ``store()`` writes.
+        """
+        now = time.time()
+        expired = []
+        for k, v in self._tokens.items():
+            exp = v.get("expires_at")
+            if isinstance(exp, (int, float)):
+                if exp < now:
+                    expired.append(k)
+            elif isinstance(exp, str):
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(exp)
+                    if dt.timestamp() < now:
+                        expired.append(k)
+                except (ValueError, TypeError):
+                    pass
+        if expired:
+            for k in expired:
+                del self._tokens[k]
+            log.info("Cleaned up %d expired MCP token(s)", len(expired))
+            self._save()
 
     def store(self, token_id: str, subject: str, client_id: str, scopes: list[str], expires_at: int) -> None:
         self._tokens[token_id] = {
             "subject": subject,
             "client_id": client_id,
             "scopes": scopes,
-            "expires_at": expires_at,
+            "expires_at": self._expires_at_to_iso(expires_at),
         }
         self._save()
 

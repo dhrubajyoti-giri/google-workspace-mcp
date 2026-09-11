@@ -36,6 +36,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from app.config import settings
+
 log = logging.getLogger("google-workspace-mcp")
 
 
@@ -72,8 +74,8 @@ class Registry:
     def _save(self, data: dict[str, Any]) -> None:
         """Save registry to disk with 0600 permissions."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
         os.chmod(tmp, 0o600)
         tmp.replace(self._path)
 
@@ -158,5 +160,6 @@ class Registry:
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo(settings.tz)).isoformat()
