@@ -129,7 +129,7 @@ for h in _raw_hosts:
 
 mcp = FastMCP(
     name=settings.mcp_server_name,
-    instructions=f"Google Workspace MCP v{settings.mcp_server_version} — Gmail, Drive, Docs, Sheets, Calendar, Slides",
+    instructions=f"Google Workspace MCP v{settings.mcp_server_version} — Gmail, Drive, Docs, Sheets, Calendar, Slides, Tasks",
     streamable_http_path="/",
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
