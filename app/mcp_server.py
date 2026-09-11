@@ -22,6 +22,18 @@ from app.tools.docs import docs_get as _docs_get, docs_create as _docs_create, d
 from app.tools.sheets import sheets_get as _sheets_get, sheets_create as _sheets_create, sheets_update as _sheets_update, sheets_append as _sheets_append
 from app.tools.calendar import calendar_list_events as _cal_list, calendar_get_event as _cal_get, calendar_create_event as _cal_create, calendar_update_event as _cal_update, calendar_delete_event as _cal_delete
 from app.tools.slides import slides_get as _slides_get, slides_create as _slides_create, slides_update as _slides_update
+from app.tools.tasks import (
+    tasks_list_lists as _tasks_list_lists,
+    tasks_get_list as _tasks_get_list,
+    tasks_create_list as _tasks_create_list,
+    tasks_delete_list as _tasks_delete_list,
+    tasks_list_tasks as _tasks_list_tasks,
+    tasks_get_task as _tasks_get_task,
+    tasks_create_task as _tasks_create_task,
+    tasks_update_task as _tasks_update_task,
+    tasks_delete_task as _tasks_delete_task,
+    tasks_complete_task as _tasks_complete_task,
+)
 
 log = logging.getLogger("google-workspace-mcp")
 
@@ -66,6 +78,17 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, list[str]] = {
     "slides_get":    ["presentations.readonly", "presentations"],
     "slides_create": ["presentations"],
     "slides_update": ["presentations"],
+    # Tasks — read tools need tasks.readonly; write tools need tasks
+    "tasks_list_lists":     ["tasks.readonly", "tasks"],
+    "tasks_get_list":       ["tasks.readonly", "tasks"],
+    "tasks_create_list":    ["tasks"],
+    "tasks_delete_list":    ["tasks"],
+    "tasks_list_tasks":     ["tasks.readonly", "tasks"],
+    "tasks_get_task":       ["tasks.readonly", "tasks"],
+    "tasks_create_task":    ["tasks"],
+    "tasks_update_task":    ["tasks"],
+    "tasks_delete_task":    ["tasks"],
+    "tasks_complete_task":  ["tasks"],
 }
 
 # ── Protocol version compatibility patch (fallback) ─────────────────
@@ -600,6 +623,191 @@ def slides_update(presentation_id: str, requests_json: str) -> CallToolResult:
     result["message"] = summary
     return CallToolResult(
         content=[TextContent(type="text", text=summary)],
+        structuredContent=result,
+    )
+
+
+# ── Tasks tools ──────────────────────────────────────────────
+
+@mcp.tool()
+def tasks_list_lists() -> CallToolResult:
+    """List all Google Tasks task lists.
+
+    Returns: human-readable summary + structured data (list of task lists).
+    """
+    results = _tasks_list_lists()
+    summary = f"Found {len(results)} task list(s)." if results else "No task lists found."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent={"lists": results, "count": len(results)},
+    )
+
+
+@mcp.tool()
+def tasks_get_list(list_id: str = "@default") -> CallToolResult:
+    """Get a single task list by ID.
+
+    Parameters:
+      list_id — the task list ID (or '@default' for the default list)
+    """
+    result = _tasks_get_list(list_id)
+    summary = f"Task list '{result.get('title', '')}' (ID: {result.get('id', '')})"
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=result,
+    )
+
+
+@mcp.tool()
+def tasks_create_list(title: str = "") -> CallToolResult:
+    """Create a new Google Tasks task list.
+
+    Parameters:
+      title — the title of the new task list
+    """
+    result = _tasks_create_list(title)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
+
+
+@mcp.tool()
+def tasks_delete_list(list_id: str = "") -> CallToolResult:
+    """Delete a task list by ID.
+
+    Parameters:
+      list_id — the task list ID to delete
+    """
+    result = _tasks_delete_list(list_id)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
+
+
+@mcp.tool()
+def tasks_list_tasks(
+    list_id: str = "@default",
+    show_completed: bool = False,
+    show_deleted: bool = False,
+    show_hidden: bool = False,
+    max_results: int = 100,
+) -> CallToolResult:
+    """List tasks in a Google Tasks task list.
+
+    Parameters:
+      list_id — the task list ID (or '@default' for the default list)
+      show_completed — if True, include completed tasks
+      show_deleted — if True, include deleted tasks
+      show_hidden — if True, include hidden tasks
+      max_results — max tasks to return (default 100)
+    """
+    results = _tasks_list_tasks(list_id, show_completed, show_deleted, show_hidden, max_results)
+    summary = f"Found {len(results)} task(s) in list '{list_id}'." if results else f"No tasks found in list '{list_id}'."
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent={"tasks": results, "list_id": list_id, "count": len(results)},
+    )
+
+
+@mcp.tool()
+def tasks_get_task(list_id: str = "@default", task_id: str = "") -> CallToolResult:
+    """Get a single task by ID.
+
+    Parameters:
+      list_id — the task list ID
+      task_id — the task ID
+    """
+    result = _tasks_get_task(list_id, task_id)
+    summary = f"Task '{result.get('title', '')}' — status: {result.get('status', '')}, ID: {result.get('id', '')}"
+    notes = result.get("notes", "")
+    if notes:
+        summary += f", notes: {notes[:80]}"
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=result,
+    )
+
+
+@mcp.tool()
+def tasks_create_task(
+    list_id: str = "@default",
+    title: str = "",
+    notes: str = "",
+    due: str = "",
+    completed: str = "",
+) -> CallToolResult:
+    """Create a new task in a Google Tasks task list.
+
+    Parameters:
+      list_id — the task list ID (or '@default' for the default list)
+      title — task title (required)
+      notes — task notes/description
+      due — due date as RFC 3339 timestamp (e.g. '2024-01-15T14:00:00.000Z')
+      completed — if set, marks task as complete with this timestamp
+    """
+    result = _tasks_create_task(list_id, title, notes, due, completed)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
+
+
+@mcp.tool()
+def tasks_update_task(
+    list_id: str = "@default",
+    task_id: str = "",
+    title: str = "",
+    notes: str = "",
+    due: str = "",
+    completed: str = "",
+    deleted: bool = False,
+) -> CallToolResult:
+    """Update a task by ID. Only non-empty fields are sent.
+
+    Parameters:
+      list_id — the task list ID
+      task_id — the task ID to update
+      title — new title (leave empty to keep current)
+      notes — new notes (leave empty to keep current)
+      due — new due date as RFC 3339 timestamp
+      completed — timestamp to mark as complete (empty string = un-complete)
+      deleted — if True, deletes the task
+    """
+    result = _tasks_update_task(list_id, task_id, title, notes, due, completed, deleted)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
+
+
+@mcp.tool()
+def tasks_delete_task(list_id: str = "@default", task_id: str = "") -> CallToolResult:
+    """Delete a task (move to trash).
+
+    Parameters:
+      list_id — the task list ID
+      task_id — the task ID to delete
+    """
+    result = _tasks_delete_task(list_id, task_id)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
+        structuredContent=result,
+    )
+
+
+@mcp.tool()
+def tasks_complete_task(list_id: str = "@default", task_id: str = "") -> CallToolResult:
+    """Mark a task as completed.
+
+    Parameters:
+      list_id — the task list ID
+      task_id — the task ID to complete
+    """
+    result = _tasks_complete_task(list_id, task_id)
+    return CallToolResult(
+        content=[TextContent(type="text", text=result["message"])],
         structuredContent=result,
     )
 
