@@ -179,11 +179,19 @@ def drive_delete_file(file_id: str) -> dict[str, Any]:
     Returns: dict with id, status, message.
     """
     service = _ensure_auth()
+    # Retrieve file name before deleting (for user-facing response)
+    file_name = file_id
+    try:
+        file_info = service.files().get(fileId=file_id, fields="name").execute()
+        file_name = file_info.get("name", file_id)
+    except Exception:
+        pass
     service.files().delete(fileId=file_id).execute()
-    log.info("Deleted Drive file — ID: %s", file_id)
+    log.info("Deleted Drive file — '%s' (%s)", file_name, file_id)
     return {
         "id": file_id,
+        "name": file_name,
         "status": "deleted",
-        "message": f"File deleted successfully — ID: {file_id}",
+        "message": f"File deleted — '{file_name}' (ID: {file_id})",
     }
 

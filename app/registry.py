@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,13 @@ class Registry:
         self._path = Path(registry_file)
         self._lock = threading.RLock()
         self._cache: dict[str, Any] | None = None
+
+        # Migration: rename old file name (registry.json) to current (access_tokens.json)
+        if self._path.name == "access_tokens.json":
+            old_path = self._path.parent / "registry.json"
+            if old_path.exists() and not self._path.exists():
+                shutil.move(str(old_path), str(self._path))
+                log.info("Migrated registry: %s → %s", old_path, self._path)
 
     @property
     def path(self) -> Path:

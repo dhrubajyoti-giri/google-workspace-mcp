@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,14 @@ class _McpTokenStore:
 
     def __init__(self, token_file: str | Path | None = None):
         self._path = Path(token_file) if token_file else None
+
+        # Migration: rename old file name (mcp_tokens.json) to current (refresh_tokens.json)
+        if self._path and self._path.name == "refresh_tokens.json":
+            old_path = self._path.parent / "mcp_tokens.json"
+            if old_path.exists() and not self._path.exists():
+                shutil.move(str(old_path), str(self._path))
+                log.info("Migrated MCP token store: %s → %s", old_path, self._path)
+
         self._tokens: dict[str, dict[str, Any]] = self._load()
         # Purge expired entries on load so stale tokens don't accumulate
         self._cleanup_expired()
@@ -692,6 +701,6 @@ class GoogleOAuthProvider:
 # Initialized at import time. oauth.py and main.py import these.
 
 _registry_file = settings.registry_file
-_mcp_tokens_file = str(Path(_registry_file).with_name("mcp_tokens.json"))
+_mcp_tokens_file = str(Path(_registry_file).with_name("refresh_tokens.json"))
 registry = Registry(_registry_file)
 provider = GoogleOAuthProvider(registry, _mcp_tokens_file)

@@ -176,15 +176,8 @@ def gmail_get_message(message_id: str) -> CallToolResult:
     Returns: human-readable summary + structured data (full message with headers, body, labels).
     """
     result = _gmail_get(message_id)
-    summary = f"Retrieved Gmail message '{result.get('id', '')}'"
-    subject = result.get("headers", {}).get("Subject", "")
-    if subject:
-        summary += f" — subject: '{subject}'"
-    frm = result.get("headers", {}).get("From", "")
-    if frm:
-        summary += f", from: {frm}"
     return CallToolResult(
-        content=[TextContent(type="text", text=summary)],
+        content=[TextContent(type="text", text=result.get("message", f"Retrieved Gmail message '{result.get('id', '')}'"))],
         structuredContent=result,
     )
 

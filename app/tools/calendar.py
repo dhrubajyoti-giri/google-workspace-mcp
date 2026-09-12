@@ -218,13 +218,15 @@ def calendar_update_event(
         body=body,
     ).execute()
     resp_id = event.get("id", event_id)
-    log.info("Updated event %s", event_id)
+    summary = event.get("summary", "")
+    log.info("Updated event '%s' (%s)", summary, resp_id)
     return {
         "id": resp_id,
+        "summary": summary,
         "updated_fields": updated_fields,
         "status": event.get("status", ""),
         "htmlLink": event.get("htmlLink", ""),
-        "message": f"Event updated successfully — ID: {resp_id} (fields: {', '.join(updated_fields) if updated_fields else 'none'})",
+        "message": f"Event updated — '{summary}' (ID: {resp_id}) — fields: {', '.join(updated_fields) if updated_fields else 'none'}",
     }
 
 
@@ -234,12 +236,20 @@ def calendar_delete_event(calendar_id: str = "primary", event_id: str = "") -> d
     Returns: dict with id, status, message.
     """
     service = _ensure_auth()
+    # Retrieve event summary before deleting (for user-facing response)
+    summary = event_id
+    try:
+        event_info = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        summary = event_info.get("summary", event_id)
+    except Exception:
+        pass
     service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
-    log.info("Deleted event %s from calendar %s", event_id, calendar_id)
+    log.info("Deleted event '%s' (%s) from calendar %s", summary, event_id, calendar_id)
     return {
         "id": event_id,
+        "summary": summary,
         "status": "deleted",
-        "message": f"Event deleted successfully — ID: {event_id}",
+        "message": f"Event deleted — '{summary}' (ID: {event_id})",
     }
 
 

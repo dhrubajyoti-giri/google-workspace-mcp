@@ -107,8 +107,10 @@ def gmail_get_message(message_id: str) -> dict[str, Any]:
         "internalDate": msg.get("internalDate", ""),
         "headers": headers,
         "snippet": msg.get("snippet", ""),
+        "subject": headers.get("Subject", ""),
         "textBody": text_body,
         "htmlBody": html_body,
+        "message": f"Message: '{headers.get('Subject', '')}' — from: {headers.get('From', '')} (ID: {msg.get('id', '')})",
     }
 
 
@@ -159,7 +161,7 @@ def gmail_send(
         "cc": cc,
         "bcc": bcc,
         "status": "sent",
-        "message": f"Email sent successfully to {to} — message ID: {msg_id}",
+        "message": f"Email sent successfully — '{subject}' to {to} (message ID: {msg_id})",
     }
 
 
@@ -204,5 +206,5 @@ def gmail_create_draft(
         "to": to,
         "subject": subject,
         "status": "draft_created",
-        "message": f"Draft created successfully — draft ID: {draft_id}, to: {to}",
+        "message": f"Draft created successfully — '{subject}' to {to} (draft ID: {draft_id})",
     }

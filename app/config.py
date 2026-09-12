@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     external_url: str = "https://mcp.example.com"
     google_client_secret_file: str = "/secrets/client_secret.json"
     google_credentials_dir: str = "/secrets"
-    registry_file: str = "/secrets/registry.json"
+    registry_file: str = "/secrets/access_tokens.json"
 
     # ── MCP JWT secret (signs access_tokens + refresh_tokens) ──
     mcp_jwt_secret: str = Field(

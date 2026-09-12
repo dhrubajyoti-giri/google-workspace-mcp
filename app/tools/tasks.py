@@ -82,12 +82,20 @@ def tasks_delete_list(list_id: str = "") -> dict[str, Any]:
     Returns a dict with: id, status, message.
     """
     service = _ensure_auth()
+    # Retrieve task list title before deleting (for user-facing response)
+    title = list_id
+    try:
+        list_info = service.tasklists().get(tasklist=list_id).execute()
+        title = list_info.get("title", list_id)
+    except Exception:
+        pass
     service.tasklists().delete(tasklist=list_id).execute()
-    log.info("Deleted task list %s", list_id)
+    log.info("Deleted task list '%s' (%s)", title, list_id)
     return {
         "id": list_id,
+        "title": title,
         "status": "deleted",
-        "message": f"Task list deleted successfully — ID: {list_id}",
+        "message": f"Task list deleted — '{title}' (ID: {list_id})",
     }
 
 
@@ -260,13 +268,14 @@ def tasks_update_task(
 
     result = service.tasks().update(tasklist=list_id, task=task_id, body=body).execute()
     task_id_result = result.get("id", task_id)
-    log.info("Updated task %s in list %s", task_id, list_id)
+    title = result.get("title", title)
+    log.info("Updated task '%s' (%s) in list %s", title, task_id, list_id)
     return {
         "id": task_id_result,
-        "title": result.get("title", ""),
+        "title": title,
         "list_id": list_id,
         "updated_fields": updated_fields,
-        "message": f"Task updated successfully — ID: {task_id_result} (fields: {', '.join(updated_fields) if updated_fields else 'none'})",
+        "message": f"Task updated — '{title}' (ID: {task_id_result}) — fields: {', '.join(updated_fields) if updated_fields else 'none'}",
     }
 
 
@@ -280,13 +289,21 @@ def tasks_delete_task(list_id: str = "@default", task_id: str = "") -> dict[str,
     Returns a dict with: id, list_id, status, message.
     """
     service = _ensure_auth()
+    # Retrieve task title before deleting (for user-facing response)
+    title = task_id
+    try:
+        task_info = service.tasks().get(tasklist=list_id, task=task_id).execute()
+        title = task_info.get("title", task_id)
+    except Exception:
+        pass
     service.tasks().delete(tasklist=list_id, task=task_id).execute()
-    log.info("Deleted task %s from list %s", task_id, list_id)
+    log.info("Deleted task '%s' (ID: %s) from list %s", title, task_id, list_id)
     return {
         "id": task_id,
+        "title": title,
         "list_id": list_id,
         "status": "deleted",
-        "message": f"Task deleted successfully — ID: {task_id} from list: {list_id}",
+        "message": f"Task deleted — '{title}' (ID: {task_id}) from list: {list_id}",
     }
 
 
@@ -308,5 +325,5 @@ def tasks_complete_task(list_id: str = "@default", task_id: str = "") -> dict[st
         "id": result.get("id", task_id),
         "title": result.get("title", ""),
         "status": "completed",
-        "message": f"Task marked as completed — ID: {task_id}",
+        "message": f"Task marked as completed — '{result.get('title', '')}' (ID: {task_id})",
     }

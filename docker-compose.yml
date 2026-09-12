@@ -13,7 +13,7 @@ services:
       # Host path: point SECRETS_VOLUME_PATH in .env at your secrets directory.
       # Contents:
       #   client_secret.json  ← Google OAuth client credentials (from Google Cloud Console)
-      #   registry.json       ← auto-generated (user tokens, per-user scopes)
+      #   access_tokens.json       ← auto-generated (user tokens, per-user scopes)
       # These are NOT in the Docker image and NOT in git.
       - ${SECRETS_VOLUME_PATH:-/path/to/secrets}:/secrets:rw
     networks:

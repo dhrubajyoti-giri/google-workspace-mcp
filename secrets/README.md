@@ -8,4 +8,4 @@ Place the following file here before starting the bridge:
 This directory is mounted into the container at `/secrets` and is **never**
 baked into the Docker image or committed to Git.
 
-`registry.json` is auto-generated here after the first user completes OAuth.
+`access_tokens.json` is auto-generated here after the first user completes OAuth.

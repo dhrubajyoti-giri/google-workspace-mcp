@@ -18,11 +18,11 @@ MCP Client (QwenPaw / Claude Desktop / Claude Code)
   │
   │ POST /mcp/  (Authorization: Bearer <JWT>)
   │
-  │ JWT "sub" claim = Google email → GoogleClient looks up credentials in registry.json → calls Google API
+  │ JWT "sub" claim = Google email → GoogleClient looks up credentials in access_tokens.json → calls Google API
 ```
 
 - **Token format**: JWT signed with `MCP_JWT_SECRET`. `sub` = Google email.
-- **Token store**: `registry.json` (per-user Google refresh tokens + granted scopes)
+- **Token store**: `access_tokens.json` (per-user Google refresh tokens + granted scopes)
 - **OAuth flow**: Two-step — identify (openid/email) → scope selection UI → authorize
 - **Token refresh**: MCP access tokens expire in 8h; clients auto-refresh using the 30d refresh token
 - **Scope changes**: Re-authorize via the client's "re-connect" button (existing scopes pre-selected)
@@ -148,14 +148,14 @@ Plus always included: `openid`, `userinfo.email`, `userinfo.profile`
 | `MCP_JWT_SECRET` | `change-me-in-production` | Secret for signing MCP JWT access/refresh tokens |
 | `MCP_PORT` | `8000` | Container listen port |
 | `GOOGLE_CLIENT_SECRET_FILE` | `/secrets/client_secret.json` | Path to Google OAuth credentials (mounted) |
-| `GOOGLE_REGISTRY_FILE` | `/secrets/registry.json` | Per-user token registry (auto-populated) |
+| `GOOGLE_REGISTRY_FILE` | `/secrets/access_tokens.json` | Per-user token registry (auto-populated) |
 | `GOOGLE_SCOPES` | *(see .env)* | Default Google API scopes if MCP client doesn't request any |
 | `MCP_ACCESS_TOKEN_TTL` | `28800` | MCP access token lifetime in seconds (8h) — client auto-refreshes |
 | `MCP_REFRESH_TOKEN_TTL` | `2592000` | MCP refresh token lifetime in seconds (30d) |
 | `MCP_AUTH_CODE_TTL` | `600` | MCP authorization code lifetime in seconds (10 min) |
 | `SCOPE_SELECTOR_MODE` | `all` | `all` (default — show every available Google scope) · `requested` (only MCP-client-requested scopes) |
 | `SCOPE_SELECTOR_MODE` | `all` | `all` (default — show every available scope in selector) · `requested` (show only MCP-client-requested scopes) |
-| `SECRETS_VOLUME_PATH` | `/path/to/secrets` | Host directory for `client_secret.json` + `registry.json` |
+| `SECRETS_VOLUME_PATH` | `/path/to/secrets` | Host directory for `client_secret.json` + `access_tokens.json` |
 | `TZ` | `Asia/Kolkata` | Timezone |
 | `LOG_LEVEL` | `INFO` | Log verbosity |
 
@@ -204,11 +204,11 @@ mcp.yourdomain.com {
 
 ## Token Persistence
 
-Once a Google account is authorized (entry in `registry.json`), the user
+Once a Google account is authorized (entry in `access_tokens.json`), the user
 does **not** need to re-authorize until that entry is removed or Google
 revokes the refresh token. Google access tokens expire silently; the bridge
 auto-refreshes them using the stored refresh token — no user interaction
-required. Remove an account by deleting its entry from `registry.json`.
+required. Remove an account by deleting its entry from `access_tokens.json`.
 
 ## Troubleshooting
 
