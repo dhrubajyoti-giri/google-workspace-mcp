@@ -9,6 +9,7 @@ from app.oauth_provider import (
     provider,
     registry,
     _sign_jwt,
+    _verify_jwt,
     _McpTokenStore,
     GoogleOAuthProvider,
     RefreshToken,
@@ -267,3 +268,122 @@ def test_load_refresh_token_works_across_client_id_rotation():
     assert result is not None, "Refresh token rejected due to client_id mismatch — this was the bug!"
     assert result.subject == subject
     assert result.token == refresh_jwt
+
+
+# ── Server-Side Auto-Refresh Tests ─────────────────────────────────────────
+
+def test_auto_refresh_renews_expired_access_token():
+    """When an MCP access token is expired, _try_auto_refresh_access_token
+    should decode it (without verifying expiry), find a valid refresh token
+    for the subject, and issue a NEW access token. This prevents the MCP
+    client (QwenPaw's HttpStatelessClient) from seeing a 401 and requiring
+    manual re-authorization.
+    """
+    import time as _time
+    from app.config import settings
+
+    test_store = _McpTokenStore(token_file=None)
+    test_provider = GoogleOAuthProvider(registry, None)
+    test_provider._mcp_tokens = test_store
+
+    subject = "user@example.com"
+
+    # Create an expired access token (exp in the past)
+    now = int(_time.time())
+    expired_token = _sign_jwt({
+        "iss": settings.external_url,
+        "sub": subject,
+        "aud": "mcp",
+        "exp": now - 3600,  # expired 1 hour ago
+        "iat": now - 7200,
+        "scope": "openid email profile",
+        "token_type": "access",
+        "jti": "expired_jti",
+    })
+
+    # Manually insert a valid refresh token for this subject into the store
+    test_store.store(
+        "refresh_jti",
+        subject=subject,
+        client_id="test_client",
+        scopes=["openid", "email"],
+        expires_at=now + settings.mcp_refresh_token_ttl,
+    )
+
+    # The expired access token should NOT pass _verify_jwt
+    assert _verify_jwt(expired_token) is None, "Expired token should fail verification"
+
+    # But _try_auto_refresh_access_token should succeed and return a new token
+    new_access = test_provider._try_auto_refresh_access_token(expired_token)
+    assert new_access is not None, "Auto-refresh should succeed when a valid refresh token exists"
+    assert new_access.subject == subject
+    assert new_access.token != expired_token, "Should be a NEW token, not the expired one"
+    assert new_access.expires_at > _time.time(), "New token should not be expired"
+
+    # The new token should pass _verify_jwt
+    assert _verify_jwt(new_access.token) is not None, "New token should pass verification"
+
+
+def test_auto_refresh_rejects_expired_refresh_token():
+    """If the refresh token in the store is also expired, auto-refresh
+    should NOT work — no valid token to issue from.
+    """
+    import time as _time
+    from app.config import settings
+
+    test_store = _McpTokenStore(token_file=None)
+    test_provider = GoogleOAuthProvider(registry, None)
+    test_provider._mcp_tokens = test_store
+
+    subject = "user@example.com"
+    now = int(_time.time())
+
+    expired_token = _sign_jwt({
+        "iss": settings.external_url,
+        "sub": subject,
+        "aud": "mcp",
+        "exp": now - 3600,
+        "iat": now - 7200,
+        "scope": "openid email",
+        "token_type": "access",
+        "jti": "expired_jti",
+    })
+
+    # Insert an EXPIRED refresh token
+    test_store.store(
+        "expired_refresh_jti",
+        subject=subject,
+        client_id="test_client",
+        scopes=["openid", "email"],
+        expires_at=now - 100,  # already expired
+    )
+
+    result = test_provider._try_auto_refresh_access_token(expired_token)
+    assert result is None, "Auto-refresh should fail when the refresh token is also expired"
+
+
+def test_auto_refresh_no_valid_subject_returns_none():
+    """If no refresh token exists for the subject at all, auto-refresh returns None.
+    This triggers the normal 401 flow so the client knows to re-authorize.
+    """
+    import time as _time
+    from app.config import settings
+
+    test_store = _McpTokenStore(token_file=None)
+    test_provider = GoogleOAuthProvider(registry, None)
+    test_provider._mcp_tokens = test_store
+
+    now = int(_time.time())
+    expired_token = _sign_jwt({
+        "iss": settings.external_url,
+        "sub": "user@example.com",
+        "aud": "mcp",
+        "exp": now - 3600,
+        "iat": now - 7200,
+        "scope": "openid email",
+        "token_type": "access",
+        "jti": "no_refresh_jti",
+    })
+
+    # Store is empty — no refresh token for this subject
+    assert test_provider._try_auto_refresh_access_token(expired_token) is None

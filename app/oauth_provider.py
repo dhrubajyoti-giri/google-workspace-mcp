@@ -192,6 +192,36 @@ class _McpTokenStore:
             self._save()
         return len(to_delete)
 
+    def get_valid_by_subject(self, subject: str) -> dict[str, Any] | None:
+        """Find the first valid (non-expired) refresh token for a subject.
+
+        Used by server-side access-token auto-refresh: when an MCP access
+        token is expired, we decode it (without verifying expiry) to get the
+        ``sub``, then look up any still-valid MCP refresh token for that user.
+        If found, a new access token is issued transparently — no 401 to the
+        MCP client, no manual re-authorization.
+
+        Returns the stored token dict (with ``client_id``, ``scopes``, etc.)
+        or None if no valid token exists for this subject.
+        """
+        now = int(time.time())
+        for v in self._tokens.values():
+            if v.get("subject") != subject:
+                continue
+            exp = v.get("expires_at")
+            if isinstance(exp, str):
+                try:
+                    from datetime import datetime as _dt
+                    if _dt.fromisoformat(exp).timestamp() < now:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+            elif isinstance(exp, (int, float)) and exp < now:
+                continue
+            # Found a valid, non-expired token
+            return v
+        return None
+
     def get(self, token_id: str) -> dict[str, Any] | None:
         return self._tokens.get(token_id)
 
@@ -511,11 +541,79 @@ class GoogleOAuthProvider:
 
     # ── Token verification ──
 
+    def _try_auto_refresh_access_token(self, expired_token: str) -> AccessToken | None:
+        """Server-side auto-refresh for expired MCP access tokens.
+
+        When ``_verify_jwt`` returns None because the access token is expired,
+        decode it without verifying expiry to extract the subject. Then check
+        if a valid (non-expired) MCP refresh token exists for that user in the
+        token store. If found, issue a new access token and return it.
+
+        This is a server-side workaround for MCP clients that don't implement
+        automatic token refresh on 401 (e.g., QwenPaw's HttpStatelessClient),
+        eliminating the need for manual re-authorization every 8 hours.
+        """
+        try:
+            payload = jwt.decode(
+                expired_token,
+                settings.mcp_jwt_secret,
+                algorithms=["HS256"],
+                options={"verify_exp": False, "verify_iat": True, "verify_aud": False},
+                issuer=settings.external_url,
+            )
+        except jwt.PyJWTError:
+            return None
+
+        # Only auto-refresh access tokens (not refresh tokens)
+        if payload.get("token_type") != "access":
+            return None
+
+        subject = payload.get("sub", "")
+        if not subject:
+            return None
+
+        scopes = payload.get("scope", "").split() if payload.get("scope") else []
+        client_id = payload.get("client_id", "")
+
+        # Check if a valid (non-expired) refresh token exists for this subject
+        if not self._mcp_tokens.get_valid_by_subject(subject):
+            return None
+
+        # Issue a new access token
+        now = int(time.time())
+        new_token = _sign_jwt({
+            "iss": settings.external_url,
+            "sub": subject,
+            "aud": "mcp",
+            "exp": now + settings.mcp_access_token_ttl,
+            "iat": now,
+            "scope": " ".join(scopes),
+            "token_type": "access",
+            "jti": secrets.token_urlsafe(16),
+            "client_id": client_id,
+        })
+        log.info("Server-side auto-refreshed access token for subject %s", subject)
+
+        return AccessToken(
+            token=new_token,
+            client_id=client_id,
+            scopes=scopes,
+            expires_at=now + settings.mcp_access_token_ttl,
+            resource=None,
+            subject=subject,
+            claims={"refreshed": True},
+        )
+
     async def load_access_token(self, token: str) -> AccessToken | None:
-        """Verify an MCP access token (JWT). Returns AccessToken with subject=Google email."""
+        """Verify an MCP access token (JWT). Returns AccessToken with subject=Google email.
+
+        If the token is expired, attempts server-side auto-refresh using the
+        stored MCP refresh token — no 401 to the client, no manual re-auth needed.
+        """
         payload = _verify_jwt(token)
         if payload is None:
-            return None
+            # Token is expired or invalid — try server-side auto-refresh
+            return self._try_auto_refresh_access_token(token)
         if payload.get("token_type") != "access":
             return None
         if payload.get("iss") != settings.external_url:
