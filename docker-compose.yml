@@ -8,6 +8,8 @@ services:
     # Runtime config: set env vars via --env-file, docker-compose.override.yml,
     # or your deployment platform. Required: EXTERNAL_URL, MCP_JWT_SECRET.
     # See .env.example for all available variables.
+    environment:
+      - GOOGLE_REGISTRY_FILE=${GOOGLE_REGISTRY_FILE:-/secrets/access_tokens.json}
     volumes:
       # ── Secrets: Google OAuth credentials + token registry ──
       # Host path: point SECRETS_VOLUME_PATH in .env at your secrets directory.
