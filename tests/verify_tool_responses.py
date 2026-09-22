@@ -3,11 +3,9 @@ human-readable content instead of bare ID strings.
 
 Run:  python tests/verify_tool_responses.py
 """
-import json
-import textwrap
 from unittest.mock import patch, MagicMock
 
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult
 
 
 def _check(label, result):
@@ -40,7 +38,7 @@ def main():
     all_pass = True
 
     # ── Gmail tools ──────────────────────────────────────────
-    with patch("app.tools.gmail.get_google_client") as mock:
+    with patch("app.tools.gmail.get_google_client"):
         client = MagicMock(); client.has_token.return_value = True
         service = MagicMock(); client.get_service.return_value = service
 
@@ -53,7 +51,7 @@ def main():
         all_pass &= _check("gmail_send", r)
 
     # ---- gmail_create_draft ----
-    with patch("app.tools.gmail.get_google_client") as mock:
+    with patch("app.tools.gmail.get_google_client"):
         client = MagicMock(); client.has_token.return_value = True
         service = MagicMock(); client.get_service.return_value = service
 
@@ -63,7 +61,7 @@ def main():
         all_pass &= _check("gmail_create_draft", r)
 
     # ── Drive tools ────────────────────────────────────────────
-    with patch("app.tools.drive.get_google_client") as mock:
+    with patch("app.tools.drive.get_google_client"):
         client = MagicMock(); client.has_token.return_value = True
         service = MagicMock(); client.get_service.return_value = service
 
@@ -83,7 +81,7 @@ def main():
         all_pass &= _check("drive_delete_file", r)
 
     # ── Docs tools ─────────────────────────────────────────────
-    with patch("app.tools.docs.get_google_client") as mock:
+    with patch("app.tools.docs.get_google_client"):
         client = MagicMock(); client.has_token.return_value = True
         service = MagicMock(); client.get_service.return_value = service
 
@@ -101,7 +99,7 @@ def main():
         all_pass &= _check("docs_update", r)
 
     # ── Sheets tools ───────────────────────────────────────────
-    with patch("app.tools.sheets.get_google_client") as mock:
+    with patch("app.tools.sheets.get_google_client"):
         client = MagicMock(); client.has_token.return_value = True
         service = MagicMock(); client.get_service.return_value = service
 
@@ -122,7 +120,7 @@ def main():
         all_pass &= _check("sheets_append", r)
 
     # ── Calendar tools ─────────────────────────────────────────
-    with patch("app.tools.calendar.get_google_client") as mock:
+    with patch("app.tools.calendar.get_google_client"):
         client = MagicMock(); client.has_token.return_value = True
         service = MagicMock(); client.get_service.return_value = service
 
@@ -151,7 +149,7 @@ def main():
         all_pass &= _check("calendar_delete_event", r)
 
     # ── Slides tools ───────────────────────────────────────────
-    with patch("app.tools.slides.get_google_client") as mock:
+    with patch("app.tools.slides.get_google_client"):
         client = MagicMock(); client.has_token.return_value = True
         service = MagicMock(); client.get_service.return_value = service
 

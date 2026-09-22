@@ -35,8 +35,6 @@ def _make_func_metadata(rv: Any, return_type: Any) -> fm.FuncMetadata:
         {"__annotations__": {"return": return_type}},
     )()
     # Create a callable with the right annotations
-    import inspect
-    sig = inspect.signature(lambda: None)
     src = f"def _tool_fn() -> {return_type.__name__ if hasattr(return_type, '__name__') else 'Any'}:\n    return None"
 
     # Simpler: use exec to create a real function with the annotation
@@ -188,15 +186,15 @@ def main():
 
     for label, ct, blocks in str_tools:
         print(f"\n  Tool: {label}()")
-        print(f"  ┌─────────────────────────────────────────────────────────────")
-        print(f"  │ ACTUAL MCP JSON-RPC response (what QwenPaw receives):")
+        print("  ┌─────────────────────────────────────────────────────────────")
+        print("  │ ACTUAL MCP JSON-RPC response (what QwenPaw receives):")
         rpc_result = json.loads(ct.model_dump_json(by_alias=True, exclude_none=True))
         print(f"  │   {json.dumps(rpc_result, indent=2).replace(chr(10), chr(10) + '  │   ')}")
-        print(f"  ├─────────────────────────────────────────────────────────────")
-        print(f"  │ What the LLM sees (QwenPaw _blocks_from_value output):")
+        print("  ├─────────────────────────────────────────────────────────────")
+        print("  │ What the LLM sees (QwenPaw _blocks_from_value output):")
         for i, b in enumerate(blocks):
             print(f"  │   block[{i}]: \"{b}\"")
-        print(f"  └─────────────────────────────────────────────────────────────")
+        print("  └─────────────────────────────────────────────────────────────")
 
     # ── Category 2: dict-returning tools ─────────────────────
     print(f"\n{'─'*78}")
@@ -212,9 +210,6 @@ def main():
         text = blocks[0] if blocks else ""
         preview = text[:80] + "..." if len(text) > 80 else text
         print(f"\n  Tool: {label}()")
-        print(f"    content[0].text preview: \"{preview}\"")
-        print(f"    structuredContent: dict with {len(ct.structuredContent or {})} keys")
-        print(f"    LLM sees: full JSON dump (usable but not human-readable)")
 
     # ── Category 3: list[dict]-returning tools ───────────────
     print(f"\n{'─'*78}")
