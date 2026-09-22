@@ -1,13 +1,11 @@
 """Tests for the OAuth flow: state store management, code exchange, cleanup."""
 import asyncio
 import time
-import pytest
 from unittest.mock import patch, MagicMock
 
 from app.oauth import _google_state_store, _cleanup_stores, _exchange_code, _build_token_data, _merge_token_data
 from app.google_client import _parse_expiry
 from app.oauth_provider import (
-    provider,
     registry,
     _sign_jwt,
     _verify_jwt,
@@ -171,7 +169,7 @@ def test_re_authorization_does_not_create_duplicate_jtis():
     mock_client = MagicMock()
     mock_client.client_id = client_id
 
-    result = asyncio.run(test_provider.exchange_authorization_code(mock_client, auth_code))
+    asyncio.run(test_provider.exchange_authorization_code(mock_client, auth_code))
 
     # Old JTI should be gone
     assert old_jti not in test_store._tokens, "Old JTI not cleaned up on re-authorization!"
@@ -515,7 +513,6 @@ def test_revoke_expired_refresh_token_removes_jti():
     """
     import asyncio
     import time as _time
-    from app.config import settings
 
     test_store = _McpTokenStore(token_file=None)
     test_provider = GoogleOAuthProvider(registry, None)
