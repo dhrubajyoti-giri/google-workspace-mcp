@@ -20,6 +20,7 @@ from googleapiclient.discovery import build
 
 from app.config import settings
 from app.registry import Registry
+from app.oauth_provider import registry as _registry
 
 # Import the MCP auth context accessor
 try:
@@ -36,13 +37,40 @@ def _to_local_iso(dt: datetime | None) -> str | None:
     """Convert a datetime to Asia/Kolkata ISO string (uses settings.tz)."""
     if dt is None:
         return None
+    from datetime import timezone as dt_tz
     from zoneinfo import ZoneInfo
-    tz = ZoneInfo(settings.tz)
     if dt.tzinfo is None:
         # Assume UTC if no tzinfo (Google API returns UTC)
-        from datetime import timezone as dt_tz
         dt = dt.replace(tzinfo=dt_tz.utc)
-    return dt.astimezone(tz).isoformat()
+    try:
+        return dt.astimezone(ZoneInfo(settings.tz)).isoformat()
+    except Exception:
+        log.warning("Invalid timezone %r, storing Google token expiry as UTC", settings.tz)
+        return dt.astimezone(dt_tz.utc).isoformat()
+
+
+def _parse_expiry(value: Any) -> datetime | None:
+    """Parse a stored Google token expiry (ISO string or datetime) to a datetime.
+
+    Naive values are assumed UTC (Google's API returns UTC; the registry has
+    historically stored both naive and aware strings). Returns None when
+    missing/unparseable — Credentials then behaves as before (no proactive
+    refresh) rather than crashing.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                from datetime import timezone as dt_tz
+                dt = dt.replace(tzinfo=dt_tz.utc)
+            return dt
+        except (ValueError, TypeError):
+            return None
+    return None
 
 
 class GoogleClient:
@@ -78,6 +106,10 @@ class GoogleClient:
             client_id=client_id,
             client_secret=client_secret,
             scopes=self._scopes,
+            # Pass the stored expiry so google-auth can proactively refresh.
+            # Without it, creds.expired is always False and stale access
+            # tokens are used until a Google API call fails.
+            expiry=_parse_expiry(self._token_data.get("expiry")),
         )
 
         if self._creds.expired:
@@ -111,8 +143,10 @@ class GoogleClient:
 
 # ── Per-request client factory ──────────────────────────────────────────────
 
-# Module-level registry singleton (same instance as oauth_provider.py)
-_registry = Registry(settings.registry_file)
+# NOTE: _registry is the shared singleton from app.oauth_provider (same object
+# main.py and oauth.py use) — not a second Registry over the same file. Two
+# instances would each hold their own lock and could lost-update each other
+# on concurrent save() (re-auth vs silent-refresh persist).
 
 
 def _load_client_creds_from_file() -> tuple[str | None, str | None]:
@@ -141,13 +175,23 @@ def _persist_updated_token(email: str, creds: Credentials) -> None:
     Only stores token-specific fields (token, refresh_token, expiry).
     client_id/client_secret are NOT stored per-user (loaded from file).
     scopes are NOT stored in token_data (registry top-level scopes is authoritative).
+
+    A Google refresh response can omit ``refresh_token``/``token_uri`` — in
+    that case the previously stored values are kept, so a refresh can never
+    wipe the long-lived credential. Uses ``update_token`` (single lock, token
+    fields only) instead of ``save`` so a concurrent scope update isn't
+    clobbered by a stale read-modify-write.
     """
-    _registry.save(email, {
+    existing = _registry.get_token(email) or {}
+    updated = {
         "token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_uri": creds.token_uri,
-        "expiry": _to_local_iso(creds.expiry) if creds.expiry else None,
-    }, _registry.get_scopes(email) or settings.default_scopes)
+        "refresh_token": creds.refresh_token or existing.get("refresh_token"),
+        "token_uri": creds.token_uri or existing.get("token_uri") or "https://oauth2.googleapis.com/token",
+        "expiry": _to_local_iso(creds.expiry) if creds.expiry else existing.get("expiry"),
+    }
+    if not _registry.update_token(email, updated):
+        log.warning("Registry entry for %s vanished during Google token refresh; re-saving", email)
+        _registry.save(email, updated, _registry.get_scopes(email) or settings.default_scopes)
 
 
 def get_google_client() -> GoogleClient:

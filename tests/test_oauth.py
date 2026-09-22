@@ -4,7 +4,8 @@ import time
 import pytest
 from unittest.mock import patch, MagicMock
 
-from app.oauth import _google_state_store, _cleanup_stores, _exchange_code, _build_token_data
+from app.oauth import _google_state_store, _cleanup_stores, _exchange_code, _build_token_data, _merge_token_data
+from app.google_client import _parse_expiry
 from app.oauth_provider import (
     provider,
     registry,
@@ -13,6 +14,7 @@ from app.oauth_provider import (
     _McpTokenStore,
     GoogleOAuthProvider,
     RefreshToken,
+    TokenError,
 )
 
 
@@ -310,18 +312,31 @@ def test_auto_refresh_renews_expired_access_token():
         expires_at=now + settings.mcp_refresh_token_ttl,
     )
 
-    # The expired access token should NOT pass _verify_jwt
-    assert _verify_jwt(expired_token) is None, "Expired token should fail verification"
+    # Auto-refresh requires the user to still exist in the Google registry
+    # (a de-authorized user must re-authorize instead of getting fresh tokens)
+    registry.save(subject, {
+        "token": "google_access",
+        "refresh_token": "google_refresh",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "expiry": None,
+    }, ["openid", "email"])
+    try:
+        # The expired access token should NOT pass _verify_jwt
+        assert _verify_jwt(expired_token) is None, "Expired token should fail verification"
 
-    # But _try_auto_refresh_access_token should succeed and return a new token
-    new_access = test_provider._try_auto_refresh_access_token(expired_token)
-    assert new_access is not None, "Auto-refresh should succeed when a valid refresh token exists"
-    assert new_access.subject == subject
-    assert new_access.token != expired_token, "Should be a NEW token, not the expired one"
-    assert new_access.expires_at > _time.time(), "New token should not be expired"
+        # But _try_auto_refresh_access_token should succeed and return a new token
+        new_access = test_provider._try_auto_refresh_access_token(expired_token)
+        assert new_access is not None, "Auto-refresh should succeed when a valid refresh token exists"
+        assert new_access.subject == subject
+        assert new_access.token != expired_token, "Should be a NEW token, not the expired one"
+        assert new_access.expires_at > _time.time(), "New token should not be expired"
+        # The STORED refresh entry's scopes win over the expired token's stale ones
+        assert sorted(new_access.scopes) == ["email", "openid"]
 
-    # The new token should pass _verify_jwt
-    assert _verify_jwt(new_access.token) is not None, "New token should pass verification"
+        # The new token should pass _verify_jwt
+        assert _verify_jwt(new_access.token) is not None, "New token should pass verification"
+    finally:
+        registry.delete(subject)
 
 
 def test_auto_refresh_rejects_expired_refresh_token():
@@ -358,8 +373,19 @@ def test_auto_refresh_rejects_expired_refresh_token():
         expires_at=now - 100,  # already expired
     )
 
-    result = test_provider._try_auto_refresh_access_token(expired_token)
-    assert result is None, "Auto-refresh should fail when the refresh token is also expired"
+    # Seed the registry so the failure comes from the expired refresh token
+    # (not from the de-authorized-user gate)
+    registry.save(subject, {
+        "token": "google_access",
+        "refresh_token": "google_refresh",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "expiry": None,
+    }, ["openid", "email"])
+    try:
+        result = test_provider._try_auto_refresh_access_token(expired_token)
+        assert result is None, "Auto-refresh should fail when the refresh token is also expired"
+    finally:
+        registry.delete(subject)
 
 
 def test_auto_refresh_no_valid_subject_returns_none():
@@ -387,3 +413,178 @@ def test_auto_refresh_no_valid_subject_returns_none():
 
     # Store is empty — no refresh token for this subject
     assert test_provider._try_auto_refresh_access_token(expired_token) is None
+
+
+def test_auto_refresh_rejects_deauthorized_user():
+    """A user removed from the Google registry must NOT get fresh MCP access
+    tokens, even with a valid refresh token in the store — they must
+    re-authorize instead.
+    """
+    import time as _time
+    from app.config import settings
+
+    test_store = _McpTokenStore(token_file=None)
+    test_provider = GoogleOAuthProvider(registry, None)
+    test_provider._mcp_tokens = test_store
+
+    subject = "gone@example.com"
+    now = int(_time.time())
+
+    expired_token = _sign_jwt({
+        "sub": subject,
+        "client_id": "test_client",
+        "exp": now - 60,
+        "scope": "openid email",
+        "token_type": "access",
+        "jti": "expired_jti_2",
+    })
+
+    test_store.store(
+        "valid_refresh_jti",
+        subject=subject,
+        client_id="test_client",
+        scopes=["openid", "email"],
+        expires_at=now + settings.mcp_refresh_token_ttl,
+    )
+
+    # No registry entry for subject → gate must refuse
+    assert registry.get(subject) is None
+    assert test_provider._try_auto_refresh_access_token(expired_token) is None
+
+
+def test_exchange_refresh_token_rejects_scope_escalation():
+    """exchange_refresh_token must not mint tokens with scopes beyond what the
+    refresh token was granted (defense-in-depth; the SDK TokenHandler also
+    enforces this, but direct callers bypass it).
+    """
+    import asyncio
+    import time as _time
+    from app.config import settings
+
+    test_store = _McpTokenStore(token_file=None)
+    test_provider = GoogleOAuthProvider(registry, None)
+    test_provider._mcp_tokens = test_store
+
+    subject = "user@example.com"
+    now = int(_time.time())
+    jti = "scoped_jti"
+
+    refresh_jwt = _sign_jwt({
+        "sub": subject,
+        "aud": "client_a",
+        "jti": jti,
+        "scope": "openid email",
+        "exp": now + settings.mcp_refresh_token_ttl,
+        "token_type": "refresh",
+    })
+    test_store.store(jti, subject=subject, client_id="client_a",
+                     scopes=["openid", "email"],
+                     expires_at=now + settings.mcp_refresh_token_ttl)
+
+    mock_client = MagicMock()
+    mock_client.client_id = "client_a"
+
+    granted = RefreshToken(
+        token=refresh_jwt,
+        client_id="client_a",
+        scopes=["openid", "email"],
+        expires_at=now + settings.mcp_refresh_token_ttl,
+        subject=subject,
+    )
+
+    # Escalation attempt → TokenError invalid_scope
+    try:
+        asyncio.run(test_provider.exchange_refresh_token(
+            mock_client, granted, ["openid", "email", "admin"]))
+        assert False, "Should have raised TokenError"
+    except TokenError as e:
+        assert e.error == "invalid_scope"
+
+    # Subset still works and rotates exactly one JTI
+    result = asyncio.run(test_provider.exchange_refresh_token(
+        mock_client, granted, ["openid"]))
+    assert result is not None
+    assert result.scope == "openid"
+    assert jti not in test_store._tokens
+    assert len(test_store._tokens) == 1
+
+
+def test_revoke_expired_refresh_token_removes_jti():
+    """Revoking an already-expired refresh token must still delete its store
+    entry (previously _verify_jwt's exp check made this a silent no-op).
+    """
+    import asyncio
+    import time as _time
+    from app.config import settings
+
+    test_store = _McpTokenStore(token_file=None)
+    test_provider = GoogleOAuthProvider(registry, None)
+    test_provider._mcp_tokens = test_store
+
+    subject = "user@example.com"
+    now = int(_time.time())
+    jti = "stale_jti"
+
+    expired_jwt = _sign_jwt({
+        "sub": subject,
+        "aud": "client_a",
+        "jti": jti,
+        "scope": "openid",
+        "exp": now - 3600,  # already expired
+        "token_type": "refresh",
+    })
+    test_store.store(jti, subject=subject, client_id="client_a",
+                     scopes=["openid"], expires_at=now - 3600)
+
+    stale = RefreshToken(
+        token=expired_jwt,
+        client_id="client_a",
+        scopes=["openid"],
+        expires_at=now - 3600,
+        subject=subject,
+    )
+    asyncio.run(test_provider.revoke_token(stale))
+    assert jti not in test_store._tokens
+
+
+def test_merge_token_data_preserves_refresh_token():
+    """Re-authorization responses that omit refresh_token must not wipe the
+    stored one — _merge_token_data falls back to the existing entry.
+    """
+    existing = {
+        "token": "old_access",
+        "refresh_token": "long_lived_refresh",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "expiry": "2030-01-01T00:00:00+00:00",
+    }
+    new = {
+        "token": "new_access",
+        "refresh_token": None,  # Google omits this on re-auth
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "expiry": None,
+    }
+    merged = _merge_token_data(existing, new)
+    assert merged["token"] == "new_access"
+    assert merged["refresh_token"] == "long_lived_refresh"
+    assert merged["expiry"] == "2030-01-01T00:00:00+00:00"
+
+    # No existing entry → new data passes through untouched
+    assert _merge_token_data(None, new)["refresh_token"] is None
+
+
+def test_parse_expiry_handles_formats():
+    """_parse_expiry must accept naive/aware ISO strings and reject garbage
+    without raising."""
+    from datetime import datetime, timezone
+
+    aware = _parse_expiry("2030-01-01T00:00:00+00:00")
+    assert aware is not None and aware.tzinfo is not None
+
+    naive = _parse_expiry("2030-01-01T00:00:00")
+    assert naive is not None and naive.tzinfo == timezone.utc
+
+    assert _parse_expiry(None) is None
+    assert _parse_expiry("not-a-date") is None
+
+    dt = datetime(2030, 1, 1)
+    assert _parse_expiry(dt) is dt

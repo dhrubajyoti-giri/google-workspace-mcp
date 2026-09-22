@@ -97,8 +97,8 @@ def _google_auth_url(
         state: Google OAuth state parameter (carries our internal {rid}|{step})
         access_type: "offline" (get refresh token) or "online" (no refresh token)
         include_granted: if True, include previously granted scopes (incremental
-                         authorization). Set False for the identify step so Google
-                         shows only the minimal consent screen.
+                          authorization). Set False for the identify step so Google
+                          shows only the minimal consent screen.
 
     Returns:
         Google authorization URL (browser should redirect user here)
@@ -297,6 +297,22 @@ def _build_token_data(token_response: dict[str, Any], flow: Any) -> dict[str, An
     }
 
 
+def _merge_token_data(existing: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
+    """Merge fresh Google token data over the stored entry without losing credentials.
+
+    Google omits ``refresh_token`` on most re-authorizations (it is only
+    returned on first consent). Overwriting the stored entry unconditionally
+    would wipe the long-lived refresh token and break all future silent
+    refreshes. Missing/empty fields in ``new`` fall back to ``existing``.
+    """
+    merged = dict(new)
+    if existing:
+        for key in ("refresh_token", "token_uri", "expiry"):
+            if not merged.get(key):
+                merged[key] = existing.get(key)
+    return merged
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────
 
 @router.get("/scale", response_class=HTMLResponse)
@@ -423,8 +439,14 @@ def callback(request: Request):
         identity_scopes = ("openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile")
         granted_scopes = [s for s in all_granted if s not in identity_scopes]
 
-        # Store in registry (keyed by Google email)
-        creds_data = _build_token_data(token_response, flow)
+        # Store in registry (keyed by Google email). Preserve the stored
+        # Google refresh_token when Google omits it in this response
+        # (re-authorizations usually don't return one).
+        stored_entry = registry.get(email) or {}
+        creds_data = _merge_token_data(
+            stored_entry.get("token"),
+            _build_token_data(token_response, flow),
+        )
         registry.save(email, creds_data, granted_scopes)
         log.info("Auth complete for %s, scopes=%d", email, len(granted_scopes))
 
@@ -537,14 +559,14 @@ def _render_scope_form(rid, visible_scopes, request):
         '  <div class="section read">\n'
         '    <h3>\U00002713\U0000fe0f Read-only scopes (' + str(read_count) + ')</h3>\n'
         '    <div class="actions">\n'
-        '      <button type="button" class="preset-btn readonly" onclick="toggleRead()">\u25c9 Only Read — read-only access only</button>\n'
+        '      <button type="button" class="preset-btn readonly" onclick="toggleRead()">◉ Only Read — read-only access only</button>\n'
         '    </div>\n'
         '    <div class="scopes">' + rows_read + '</div>\n'
         '  </div>\n'
         '  <div class="section write">\n'
-        '    <h3>\U0000270f\ufe0f Read + Write scopes (' + str(write_count) + ')</h3>\n'
+        '    <h3>\u270f\ufe0f Read + Write scopes (' + str(write_count) + ')</h3>\n'
         '    <div class="actions">\n'
-        '      <button type="button" class="preset-btn full" onclick="toggleFull()">\u26a1 Full Access — read + write</button>\n'
+        '      <button type="button" class="preset-btn full" onclick="toggleFull()">⚡ Full Access — read + write</button>\n'
         '    </div>\n'
         '    <div class="scopes">' + rows_write + '</div>\n'
         '  </div>\n'

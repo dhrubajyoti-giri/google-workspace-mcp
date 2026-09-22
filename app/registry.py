@@ -109,6 +109,26 @@ class Registry:
             self._save(data)
             log.info("Registry updated for user %s (scopes: %d)", email, len(scopes))
 
+    def update_token(self, email: str, token_data: dict[str, Any]) -> bool:
+        """Update only a user's Google token fields (single lock).
+
+        Unlike ``save()`` (which replaces the whole entry including scopes),
+        this touches just ``token`` + ``refreshed_at`` — used when persisting
+        a silently-refreshed Google access token, so a concurrent scope update
+        can't be clobbered by a stale read-modify-write. Preserves
+        ``user_id``, ``scopes`` and ``authorized_at``. Returns False if the
+        user doesn't exist.
+        """
+        with self._lock:
+            data = self._load()
+            user = data["users"].get(email)
+            if user is None:
+                return False
+            user["token"] = token_data
+            user["refreshed_at"] = _now_iso()
+            self._save(data)
+            return True
+
     def delete(self, email: str) -> bool:
         """Delete a user's entry. Returns True if existed."""
         with self._lock:

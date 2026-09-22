@@ -21,6 +21,7 @@ import logging
 import os
 import secrets
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from mcp.server.auth.provider import (
     AuthorizationCode,
     OAuthAuthorizationServerProvider,
     RefreshToken,
+    TokenError,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
@@ -78,10 +80,15 @@ class _McpTokenStore:
     File format: JSON mapping refresh_token_jti → {subject, client_id, scopes, expires_at}
     ``expires_at`` is stored as an ISO-8601 string in the configured local timezone
     (``settings.tz``, e.g. Asia/Kolkata).
+
+    All read-modify-write cycles are guarded by an internal lock so concurrent
+    token exchanges/refreshes in one process can't interleave and duplicate
+    entries or resurrect deleted JTIs.
     """
 
     def __init__(self, token_file: str | Path | None = None):
         self._path = Path(token_file) if token_file else None
+        self._lock = threading.Lock()
 
         # Migration: rename old file name (mcp_tokens.json) to current (refresh_tokens.json)
         if self._path and self._path.name == "refresh_tokens.json":
@@ -119,124 +126,168 @@ class _McpTokenStore:
         from datetime import datetime, timezone
         from zoneinfo import ZoneInfo
         dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
-        return dt.astimezone(ZoneInfo(settings.tz)).isoformat()
+        try:
+            return dt.astimezone(ZoneInfo(settings.tz)).isoformat()
+        except Exception:
+            # Invalid TZ config — store as UTC rather than crashing store().
+            log.warning("Invalid timezone %r, storing MCP token expiry as UTC", settings.tz)
+            return dt.isoformat()
+
+    @staticmethod
+    def _expiry_to_timestamp(exp: Any) -> float | None:
+        """Normalize a stored expiry (Unix seconds or ISO string) to epoch seconds.
+
+        Naive ISO strings are interpreted as UTC (matching
+        ``_expires_at_to_iso``, which serializes aware UTC datetimes).
+        Returns None when the value is missing or unparseable.
+        """
+        if isinstance(exp, (int, float)):
+            return float(exp)
+        if isinstance(exp, str):
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.fromisoformat(exp)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp()
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    @classmethod
+    def _is_expired(cls, exp: Any, now: float) -> bool:
+        """Fail closed: a missing or unparseable expiry counts as expired."""
+        ts = cls._expiry_to_timestamp(exp)
+        if ts is None:
+            return True
+        return ts < now
 
     def _cleanup_expired(self) -> None:
-        """Remove entries whose expiry is in the past.
+        """Remove entries whose expiry is in the past (or unparseable).
 
-        Handles both the old Unix-timestamp format (int/float) and the new
+        Handles both the old Unix-timestamp format (int/float) and the
         ISO-string format that ``store()`` writes.
         """
         now = time.time()
-        expired = []
-        for k, v in self._tokens.items():
-            exp = v.get("expires_at")
-            if isinstance(exp, (int, float)):
-                if exp < now:
-                    expired.append(k)
-            elif isinstance(exp, str):
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(exp)
-                    if dt.timestamp() < now:
-                        expired.append(k)
-                except (ValueError, TypeError):
-                    pass
-        if expired:
-            for k in expired:
-                del self._tokens[k]
-            log.info("Cleaned up %d expired MCP token(s)", len(expired))
-            self._save()
+        with self._lock:
+            expired = [
+                k for k, v in self._tokens.items()
+                if self._is_expired(v.get("expires_at"), now)
+            ]
+            if expired:
+                for k in expired:
+                    del self._tokens[k]
+                log.info("Cleaned up %d expired MCP token(s)", len(expired))
+                self._save()
 
     def store(self, token_id: str, subject: str, client_id: str, scopes: list[str], expires_at: int) -> None:
-        self._tokens[token_id] = {
-            "subject": subject,
-            "client_id": client_id,
-            "scopes": scopes,
-            "expires_at": self._expires_at_to_iso(expires_at),
-        }
-        self._save()
-
-    def delete_by_subject(self, subject: str) -> int:
-        """Delete all tokens for a given subject (user email).
-
-        Called during re-authorization to prevent duplicate JTI entries
-        in ``mcp_tokens.json``. When a user re-authorizes with a specific
-        MCP client, the old refresh token JTI for that user+client combo
-        is removed so it can't accumulate indefinitely.
-
-        Returns the number of deleted entries.
-        """
-        to_delete = [
-            k for k, v in self._tokens.items()
-            if v.get("subject") == subject
-        ]
-        for k in to_delete:
-            del self._tokens[k]
-        if to_delete:
-            log.info("Deleted %d old MCP token(s) for subject %s (re-authorization)",
-                     len(to_delete), subject)
+        with self._lock:
+            self._tokens[token_id] = {
+                "subject": subject,
+                "client_id": client_id,
+                "scopes": scopes,
+                "expires_at": self._expires_at_to_iso(expires_at),
+            }
             self._save()
-        return len(to_delete)
+
+    def rotate(
+        self,
+        old_jti: str | None,
+        new_jti: str,
+        subject: str,
+        client_id: str,
+        scopes: list[str],
+        expires_at: int,
+    ) -> None:
+        """Atomically store a rotated refresh token and drop the old JTI.
+
+        Single lock + single disk write, so a crash or a concurrent exchange
+        can't leave old and new tokens valid at the same time (replay) or
+        lose the new token while the old one is gone.
+        """
+        with self._lock:
+            self._tokens[new_jti] = {
+                "subject": subject,
+                "client_id": client_id,
+                "scopes": scopes,
+                "expires_at": self._expires_at_to_iso(expires_at),
+            }
+            if old_jti:
+                self._tokens.pop(old_jti, None)
+            self._save()
 
     def delete_by_subject_and_client(self, subject: str, client_id: str) -> int:
         """Delete all tokens for a given subject AND client_id.
 
-        More targeted than ``delete_by_subject`` — only removes tokens
+        More targeted than a subject-wide delete — only removes tokens
         issued to the same user+client combination, preserving tokens
         that other MCP clients (e.g. Claude Desktop vs QwenPaw) may
         have for the same user.
 
         Returns the number of deleted entries.
         """
-        to_delete = [
-            k for k, v in self._tokens.items()
-            if v.get("subject") == subject and v.get("client_id") == client_id
-        ]
-        for k in to_delete:
-            del self._tokens[k]
-        if to_delete:
-            log.info("Deleted %d old MCP token(s) for subject %s / client %s (re-authorization)",
-                     len(to_delete), subject, client_id)
-            self._save()
-        return len(to_delete)
+        with self._lock:
+            to_delete = [
+                k for k, v in self._tokens.items()
+                if v.get("subject") == subject and v.get("client_id") == client_id
+            ]
+            for k in to_delete:
+                del self._tokens[k]
+            if to_delete:
+                log.info("Deleted %d old MCP token(s) for subject %s / client %s (re-authorization)",
+                         len(to_delete), subject, client_id)
+                self._save()
+            return len(to_delete)
 
-    def get_valid_by_subject(self, subject: str) -> dict[str, Any] | None:
-        """Find the first valid (non-expired) refresh token for a subject.
+    def get_valid_by_subject(self, subject: str, client_id: str | None = None) -> dict[str, Any] | None:
+        """Find a valid (non-expired) refresh token entry for a subject.
 
         Used by server-side access-token auto-refresh: when an MCP access
         token is expired, we decode it (without verifying expiry) to get the
-        ``sub``, then look up any still-valid MCP refresh token for that user.
+        ``sub``, then look up a still-valid MCP refresh token for that user.
         If found, a new access token is issued transparently — no 401 to the
         MCP client, no manual re-authorization.
 
-        Returns the stored token dict (with ``client_id``, ``scopes``, etc.)
-        or None if no valid token exists for this subject.
+        Prefers an entry issued to ``client_id``; falls back to any valid
+        entry for the subject so clients that rotate client_ids (dynamic
+        client registration) keep working. Expired entries encountered are
+        purged (lazy cleanup — the store no longer grows unbounded).
+
+        Returns the stored token dict plus its ``jti``, or None.
         """
-        now = int(time.time())
-        for v in self._tokens.values():
-            if v.get("subject") != subject:
-                continue
-            exp = v.get("expires_at")
-            if isinstance(exp, str):
-                try:
-                    from datetime import datetime as _dt
-                    if _dt.fromisoformat(exp).timestamp() < now:
-                        continue
-                except (ValueError, TypeError):
+        now = time.time()
+        with self._lock:
+            match: dict[str, Any] | None = None
+            fallback: dict[str, Any] | None = None
+            expired: list[str] = []
+            for jti, v in self._tokens.items():
+                if v.get("subject") != subject:
                     continue
-            elif isinstance(exp, (int, float)) and exp < now:
-                continue
-            # Found a valid, non-expired token
-            return v
-        return None
+                if self._is_expired(v.get("expires_at"), now):
+                    expired.append(jti)
+                    continue
+                entry = {**v, "jti": jti}
+                if client_id is not None and v.get("client_id") == client_id:
+                    match = entry
+                    break
+                if fallback is None:
+                    fallback = entry
+            if expired:
+                for k in expired:
+                    self._tokens.pop(k, None)
+                self._save()
+                log.info("Purged %d expired MCP token(s) for subject %s", len(expired), subject)
+            return match if match is not None else fallback
 
     def get(self, token_id: str) -> dict[str, Any] | None:
-        return self._tokens.get(token_id)
+        with self._lock:
+            v = self._tokens.get(token_id)
+            return dict(v) if v is not None else None
 
     def delete(self, token_id: str) -> None:
-        self._tokens.pop(token_id, None)
-        self._save()
+        with self._lock:
+            if self._tokens.pop(token_id, None) is not None:
+                self._save()
 
 
 # ── Request-scoped state (for Google OAuth callback coordination) ─────────
@@ -274,6 +325,24 @@ def _verify_jwt(token: str) -> dict[str, Any] | None:
             settings.mcp_jwt_secret,
             algorithms=["HS256"],
             options={"verify_exp": True, "verify_iat": True, "verify_aud": False},
+            issuer=settings.external_url,
+        )
+    except jwt.PyJWTError:
+        return None
+
+
+def _decode_jwt_no_exp(token: str) -> dict[str, Any] | None:
+    """Decode an MCP JWT without enforcing expiry (signature + issuer still verified).
+
+    Used when claims (e.g. ``jti``) are needed from a token that may already
+    be expired — revocation and rotation must work on expired tokens too.
+    """
+    try:
+        return jwt.decode(
+            token,
+            settings.mcp_jwt_secret,
+            algorithms=["HS256"],
+            options={"verify_exp": False, "verify_iat": True, "verify_aud": False},
             issuer=settings.external_url,
         )
     except jwt.PyJWTError:
@@ -422,6 +491,7 @@ class GoogleOAuthProvider:
         access_token = _sign_jwt({
             "sub": subject,
             "client_id": client.client_id,
+            "jti": secrets.token_urlsafe(16),
             "scope": " ".join(authorization_code.scopes),
             "exp": now + settings.mcp_access_token_ttl,
             "token_type": "access",
@@ -492,6 +562,14 @@ class GoogleOAuthProvider:
         if stored is None:
             return None
 
+        # Belt-and-braces: the store's own expiry must also hold. Normally it
+        # mirrors the JWT exp, but a hand-edited store file or clock skew can
+        # diverge them — fail closed and drop the stale entry.
+        if _McpTokenStore._is_expired(stored.get("expires_at"), time.time()):
+            log.info("Dropping stale MCP refresh token entry (jti=%s)", jti)
+            self._mcp_tokens.delete(jti)
+            return None
+
         return RefreshToken(
             token=refresh_token,
             client_id=client.client_id,
@@ -507,18 +585,31 @@ class GoogleOAuthProvider:
         scopes: list[str],
     ) -> OAuthToken:
         """Exchange MCP refresh token for a new access + refresh token."""
+        # Defense-in-depth: the SDK's TokenHandler already rejects out-of-range
+        # scopes, but direct callers bypass it — never escalate scopes here.
+        granted = set(refresh_token.scopes or [])
+        if not set(scopes) <= granted:
+            raise TokenError(
+                error="invalid_scope",
+                error_description="cannot request scope not provided by refresh token",
+            )
+
         now = int(time.time())
         subject = refresh_token.subject
 
         access_token = _sign_jwt({
             "sub": subject,
             "client_id": client.client_id,
+            "jti": secrets.token_urlsafe(16),
             "scope": " ".join(scopes),
             "exp": now + settings.mcp_access_token_ttl,
             "token_type": "access",
         })
 
-        # Rotate refresh token
+        # Rotate refresh token — atomically store the new JTI and drop the old
+        # one (single lock + single write; see _McpTokenStore.rotate). The old
+        # JTI is decoded WITHOUT enforcing expiry so rotation invalidates the
+        # predecessor even if it just expired.
         new_jti = secrets.token_urlsafe(16)
         new_refresh = _sign_jwt({
             "sub": subject,
@@ -529,17 +620,18 @@ class GoogleOAuthProvider:
             "token_type": "refresh",
         })
 
-        self._mcp_tokens.store(
+        old_payload = _decode_jwt_no_exp(refresh_token.token)
+        old_jti = old_payload.get("jti") if old_payload else None
+        self._mcp_tokens.rotate(
+            old_jti,
             new_jti,
             subject=subject,
             client_id=client.client_id,
             scopes=scopes,
             expires_at=now + settings.mcp_refresh_token_ttl,
         )
-        # Revoke old refresh token (extract JTI from JWT, not the JWT string)
-        old_payload = _verify_jwt(refresh_token.token)
-        if old_payload and old_payload.get("jti"):
-            self._mcp_tokens.delete(old_payload["jti"])
+        if old_jti is None:
+            log.warning("Rotated MCP refresh token for %s but could not decode old JTI", subject)
 
         return OAuthToken(
             access_token=access_token,
@@ -561,16 +653,14 @@ class GoogleOAuthProvider:
         This is a server-side workaround for MCP clients that don't implement
         automatic token refresh on 401 (e.g., QwenPaw's HttpStatelessClient),
         eliminating the need for manual re-authorization every 8 hours.
+
+        The STORED refresh entry's scopes/client_id are authoritative — the
+        expired token's may predate a scope change. The user must also still
+        exist in the Google registry (a de-authorized user gets a 401 and
+        re-authorizes instead of fresh tokens).
         """
-        try:
-            payload = jwt.decode(
-                expired_token,
-                settings.mcp_jwt_secret,
-                algorithms=["HS256"],
-                options={"verify_exp": False, "verify_iat": True, "verify_aud": False},
-                issuer=settings.external_url,
-            )
-        except jwt.PyJWTError:
+        payload = _decode_jwt_no_exp(expired_token)
+        if payload is None:
             return None
 
         # Only auto-refresh access tokens (not refresh tokens)
@@ -581,25 +671,30 @@ class GoogleOAuthProvider:
         if not subject:
             return None
 
-        scopes = payload.get("scope", "").split() if payload.get("scope") else []
-        client_id = payload.get("client_id", "")
-
-        # Check if a valid (non-expired) refresh token exists for this subject
-        if not self._mcp_tokens.get_valid_by_subject(subject):
+        if not self._registry.user_exists(subject):
             return None
 
-        # Issue a new access token
+        # Check if a valid (non-expired) refresh token exists for this subject,
+        # preferring one issued to the same client.
+        stored = self._mcp_tokens.get_valid_by_subject(
+            subject, payload.get("client_id") or None
+        )
+        if stored is None:
+            return None
+
+        scopes = stored.get("scopes") or []
+        client_id = stored.get("client_id") or ""
+
+        # Issue a new access token (same claim schema as the exchange paths:
+        # no aud on access tokens, jti always present).
         now = int(time.time())
         new_token = _sign_jwt({
-            "iss": settings.external_url,
             "sub": subject,
-            "aud": "mcp",
-            "exp": now + settings.mcp_access_token_ttl,
-            "iat": now,
-            "scope": " ".join(scopes),
-            "token_type": "access",
-            "jti": secrets.token_urlsafe(16),
             "client_id": client_id,
+            "jti": secrets.token_urlsafe(16),
+            "scope": " ".join(scopes),
+            "exp": now + settings.mcp_access_token_ttl,
+            "token_type": "access",
         })
         log.info("Server-side auto-refreshed access token for subject %s", subject)
 
@@ -648,16 +743,30 @@ class GoogleOAuthProvider:
     # ── Revocation ──
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
-        """Revoke an MCP token."""
+        """Revoke an MCP token.
+
+        Refresh tokens are deleted by JTI — decoded without enforcing expiry
+        so already-expired tokens are actually removed instead of lingering.
+        Revoking an access token also drops that subject+client's refresh
+        entries, so no new access tokens can be auto-refreshed afterwards.
+        """
         # For refresh tokens, we need to invalidate in the store
         if isinstance(token, RefreshToken):
-            # The token string is a JWT; extract jti
-            payload = _verify_jwt(token.token)
+            # The token string is a JWT; extract jti (expiry not enforced —
+            # an expired-but-stored token must still be deletable)
+            payload = _decode_jwt_no_exp(token.token)
             if payload and payload.get("jti"):
                 self._mcp_tokens.delete(payload["jti"])
             log.info("MCP refresh token revoked for subject %s", token.subject or "unknown")
         elif isinstance(token, AccessToken):
-            log.info("MCP access token verified for revocation (subject=%s)", token.subject or "unknown")
+            if token.subject:
+                removed = self._mcp_tokens.delete_by_subject_and_client(
+                    token.subject, token.client_id or ""
+                )
+                log.info("MCP access token revoked for subject=%s (dropped %d refresh entries)",
+                         token.subject, removed)
+            else:
+                log.info("MCP access token revocation ignored (no subject)")
 
     def _generate_mcp_auth_code(
         self,
@@ -691,6 +800,7 @@ class GoogleOAuthProvider:
         """Generate an MCP JWT access token (for manual testing)."""
         return _sign_jwt({
             "sub": subject,
+            "jti": secrets.token_urlsafe(16),
             "scope": " ".join(scopes),
             "exp": int(time.time()) + settings.mcp_access_token_ttl,
             "token_type": "access",
