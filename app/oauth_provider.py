@@ -33,7 +33,6 @@ from pydantic import AnyUrl
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
-    OAuthAuthorizationServerProvider,
     RefreshToken,
     TokenError,
 )
@@ -290,12 +289,6 @@ class _McpTokenStore:
                 self._save()
 
 
-# ── Request-scoped state (for Google OAuth callback coordination) ─────────
-
-# Maps Google OAuth state → {request_id, mcp_state, step, selected_scopes}
-_google_oauth_state: dict[str, dict[str, Any]] = {}
-
-
 # ── MCP JWT helpers ────────────────────────────────────────────────────────
 
 def _sign_jwt(payload: dict[str, Any]) -> str:
@@ -351,7 +344,7 @@ def _decode_jwt_no_exp(token: str) -> dict[str, Any] | None:
 
 # ── Permissive client (for unregistered MCP clients) ─────────────────────────
 
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata
+from mcp.shared.auth import OAuthClientInformationFull
 
 class PermissiveOAuthClient(OAuthClientInformationFull):
     """Client that accepts any redirect_uri and any scope.

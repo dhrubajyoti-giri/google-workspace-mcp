@@ -342,7 +342,7 @@ async def lifespan(app: FastAPI):
 
     registry_users = registry.list_users()
     if registry_users:
-        log.info("Registry: %d authorized user(s): %s", len(registry_users), [u["email"] for u in registry_users])
+        log.info("Registry: %d authorized user(s)", len(registry_users))
     else:
         log.info("Registry: no authorized users — authorize via your MCP client")
 
@@ -430,7 +430,9 @@ app.add_middleware(MCPPathNormalizer)
 def healthz():
     """Health check — reports service, MCP, and OAuth status.
 
-    Public endpoint (no bearer token required).
+    Public endpoint (no bearer token required). Reports only whether any
+    users are authorized — never user emails (that would let anyone
+    enumerate authorized Google accounts).
     """
     users = registry.list_users()
     return JSONResponse({
@@ -438,7 +440,7 @@ def healthz():
         "version": settings.mcp_server_version,
         "mcp_enabled": True,
         "oauth_configured": bool(users),
-        "registered_users": [u["email"] for u in users],
+        "registered_user_count": len(users),
         "mcp_auth": f"{settings.external_url}/oauth/scale",
     })
 

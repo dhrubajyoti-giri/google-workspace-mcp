@@ -37,7 +37,7 @@ def tasks_get_list(list_id: str = "@default") -> dict[str, Any]:
     """Get a single task list by ID.
 
     Parameters:
-      list_id — the task list ID (or '@default' for the default list)
+      list_id — the task list ID
 
     Returns a dict with: id, title, kind, selfLink.
     """
@@ -222,7 +222,7 @@ def tasks_update_task(
     title: str = "",
     notes: str = "",
     due: str = "",
-    completed: str = "",
+    completed: str | None = None,
     deleted: bool = False,
 ) -> dict[str, Any]:
     """Update a task by ID. Only non-empty fields are sent in the patch.
@@ -233,7 +233,8 @@ def tasks_update_task(
       title — new title (leave empty to keep current)
       notes — new notes (leave empty to keep current)
       due — new due date as RFC 3339 timestamp
-      completed — timestamp to mark as complete (empty string clears it → sets status to 'needsAction')
+      completed — timestamp to mark as complete; pass "" to un-complete
+        (leave unset to keep current completion status)
       deleted — if True, deletes the task
 
     Returns a dict with: id, title, list_id, updated_fields, message.
@@ -242,13 +243,14 @@ def tasks_update_task(
     body: dict[str, Any] = {}
     updated_fields: list[str] = []
 
-    # If completed is provided, we're toggling completion status
+    # If completed is provided, we're toggling completion status.
+    # None (the default) means "leave unchanged"; only an explicit ""
+    # clears completion, since "" is also the falsy/empty value.
     if completed:
         body["completed"] = completed
         body["status"] = "completed"
         updated_fields.append("completed")
     elif completed == "":
-        # Empty string means user wants to un-complete the task
         body["completed"] = None
         body["status"] = "needsAction"
         updated_fields.append("completed")
@@ -286,7 +288,7 @@ def tasks_delete_task(list_id: str = "@default", task_id: str = "") -> dict[str,
       list_id — the task list ID
       task_id — the task ID to delete
 
-    Returns a dict with: id, list_id, status, message.
+    Returns a dict with: id, title, list_id, status, message.
     """
     service = _ensure_auth()
     # Retrieve task title before deleting (for user-facing response)

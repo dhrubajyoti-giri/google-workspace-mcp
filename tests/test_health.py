@@ -31,3 +31,15 @@ def test_root_returns_info(client):
     assert "service" in data
     assert data["service"] == "Google Workspace MCP"
     assert "/mcp" in data["mcp_endpoint"]
+
+
+def test_healthz_does_not_leak_user_emails(client):
+    """Public /healthz must never enumerate authorized Google accounts."""
+    resp = client.get("/healthz")
+    data = resp.json()
+    assert "registered_users" not in data
+    assert data["registered_user_count"] >= 0
+    for value in data.values():
+        if isinstance(value, list):
+            for item in value:
+                assert "@" not in str(item)

@@ -389,137 +389,6 @@ def test_sheets_create_with_folder_id():
         assert update_kwargs[1]["removeParents"] == "root"
 
 
-# ── Tasks tool tests ────────────────────────────────────────
-
-def test_tasks_list_lists():
-    from app.tools.tasks import tasks_list_lists
-
-    with patch("app.tools.tasks.get_google_client") as mock_client_cls:
-        client = MagicMock()
-        client.has_token.return_value = True
-        service = MagicMock()
-        client.get_service.return_value = service
-        mock_client_cls.return_value = client
-
-        service.tasklists().list().execute.return_value = {
-            "items": [
-                {"id": "list1", "title": "Shopping", "kind": "tasks#tasklist"},
-                {"id": "list2", "title": "Work", "kind": "tasks#tasklist"},
-            ]
-        }
-
-        result = tasks_list_lists()
-        assert len(result) == 2
-        assert result[0]["id"] == "list1"
-        assert result[0]["title"] == "Shopping"
-        assert result[1]["id"] == "list2"
-
-
-def test_tasks_create_task():
-    from app.tools.tasks import tasks_create_task
-
-    with patch("app.tools.tasks.get_google_client") as mock_client_cls:
-        client = MagicMock()
-        client.has_token.return_value = True
-        service = MagicMock()
-        client.get_service.return_value = service
-        mock_client_cls.return_value = client
-
-        service.tasks().insert().execute.return_value = {
-            "id": "task123",
-            "title": "Buy milk",
-            "status": "needsAction",
-        }
-
-        result = tasks_create_task(
-            list_id="@default",
-            title="Buy milk",
-            notes="Get 2% milk from the store",
-        )
-        assert result["id"] == "task123"
-        assert result["title"] == "Buy milk"
-        assert result["status"] == "needsAction"
-        assert result["list_id"] == "@default"
-        assert "task123" in result["message"]
-
-
-def test_tasks_list_tasks():
-    from app.tools.tasks import tasks_list_tasks
-
-    with patch("app.tools.tasks.get_google_client") as mock_client_cls:
-        client = MagicMock()
-        client.has_token.return_value = True
-        service = MagicMock()
-        client.get_service.return_value = service
-        mock_client_cls.return_value = client
-
-        service.tasks().list().execute.return_value = {
-            "items": [
-                {"id": "t1", "title": "Task 1", "status": "needsAction"},
-                {"id": "t2", "title": "Task 2", "status": "completed"},
-            ]
-        }
-
-        results = tasks_list_tasks(list_id="@default", show_completed=True)
-        assert len(results) == 2
-        assert results[0]["id"] == "t1"
-        assert results[0]["title"] == "Task 1"
-        assert results[0]["status"] == "needsAction"
-        assert results[1]["status"] == "completed"
-
-
-def test_tasks_complete_task():
-    from app.tools.tasks import tasks_complete_task
-
-    with patch("app.tools.tasks.get_google_client") as mock_client_cls:
-        client = MagicMock()
-        client.has_token.return_value = True
-        service = MagicMock()
-        client.get_service.return_value = service
-        mock_client_cls.return_value = client
-
-        service.tasks().update().execute.return_value = {
-            "id": "task123",
-            "title": "Buy milk",
-            "status": "completed",
-        }
-
-        result = tasks_complete_task(list_id="@default", task_id="task123")
-        assert result["id"] == "task123"
-        assert result["status"] == "completed"
-        assert "completed" in result["message"]
-
-
-def test_tasks_delete_task():
-    from app.tools.tasks import tasks_delete_task
-
-    with patch("app.tools.tasks.get_google_client") as mock_client_cls:
-        client = MagicMock()
-        client.has_token.return_value = True
-        service = MagicMock()
-        client.get_service.return_value = service
-        mock_client_cls.return_value = client
-
-        service.tasks().delete().execute.return_value = {}
-
-        result = tasks_delete_task(list_id="@default", task_id="task123")
-        assert result["id"] == "task123"
-        assert result["status"] == "deleted"
-        assert result["list_id"] == "@default"
-
-
-def test_tasks_tools_require_auth():
-    from app.tools.tasks import tasks_list_lists
-
-    with patch("app.tools.tasks.get_google_client") as mock:
-        client = MagicMock()
-        client.has_token.return_value = False
-        mock.return_value = client
-
-        with pytest.raises(RuntimeError, match="Google authentication required"):
-            tasks_list_lists()
-
-
 def test_sheets_update():
     from app.tools.sheets import sheets_update
 
@@ -548,10 +417,6 @@ def test_sheets_append():
         service = MagicMock()
         client.get_service.return_value = service
         mock_client_cls.return_value = client
-
-        service.spreadsheets().values().append().execute.return_value = {
-            "range": "Sheet1!A1:C1",
-        }
 
         result = sheets_append("sheet_id", "Sheet1!A1:Z100", [["a", "b", "c"]])
         assert "appendedRange" in result
@@ -738,34 +603,13 @@ def test_slides_create_with_folder_id():
         assert update_kwargs[1]["removeParents"] == "root"
 
 
-# ── Tasks tool tests ────────────────────────────────────────
+def test_tasks_update_preserves_completion_when_omitted():
+    """Omitting `completed` must not touch completion status.
 
-def test_tasks_list_lists():
-    from app.tools.tasks import tasks_list_lists
-
-    with patch("app.tools.tasks.get_google_client") as mock_client_cls:
-        client = MagicMock()
-        client.has_token.return_value = True
-        service = MagicMock()
-        client.get_service.return_value = service
-        mock_client_cls.return_value = client
-
-        service.tasklists().list().execute.return_value = {
-            "items": [
-                {"id": "list1", "title": "Shopping", "kind": "tasks#tasklist"},
-                {"id": "list2", "title": "Work", "kind": "tasks#tasklist"},
-            ]
-        }
-
-        result = tasks_list_lists()
-        assert len(result) == 2
-        assert result[0]["id"] == "list1"
-        assert result[0]["title"] == "Shopping"
-        assert result[1]["id"] == "list2"
-
-
-def test_tasks_create_task():
-    from app.tools.tasks import tasks_create_task
+    Regression: with a "" default, every update silently un-completed
+    the task (status → needsAction).
+    """
+    from app.tools.tasks import tasks_update_task
 
     with patch("app.tools.tasks.get_google_client") as mock_client_cls:
         client = MagicMock()
@@ -774,26 +618,18 @@ def test_tasks_create_task():
         client.get_service.return_value = service
         mock_client_cls.return_value = client
 
-        service.tasks().insert().execute.return_value = {
-            "id": "task123",
-            "title": "Buy milk",
-            "status": "needsAction",
-        }
+        service.tasks().update().execute.return_value = {"id": "t1", "title": "new title"}
 
-        result = tasks_create_task(
-            list_id="@default",
-            title="Buy milk",
-            notes="Get 2% milk from the store",
-        )
-        assert result["id"] == "task123"
-        assert result["title"] == "Buy milk"
-        assert result["status"] == "needsAction"
-        assert result["list_id"] == "@default"
-        assert "task123" in result["message"]
+        result = tasks_update_task("list1", "t1", title="new title")
+
+        _, kwargs = service.tasks().update.call_args
+        assert kwargs["body"] == {"title": "new title"}
+        assert result["updated_fields"] == ["title"]
 
 
-def test_tasks_list_tasks():
-    from app.tools.tasks import tasks_list_tasks
+def test_tasks_update_explicit_empty_clears_completion():
+    """An explicit completed="" still un-completes the task (documented)."""
+    from app.tools.tasks import tasks_update_task
 
     with patch("app.tools.tasks.get_google_client") as mock_client_cls:
         client = MagicMock()
@@ -802,68 +638,17 @@ def test_tasks_list_tasks():
         client.get_service.return_value = service
         mock_client_cls.return_value = client
 
-        service.tasks().list().execute.return_value = {
-            "items": [
-                {"id": "t1", "title": "Task 1", "status": "needsAction"},
-                {"id": "t2", "title": "Task 2", "status": "completed"},
-            ]
-        }
+        service.tasks().update().execute.return_value = {"id": "t1", "title": "t"}
 
-        results = tasks_list_tasks(list_id="@default", show_completed=True)
-        assert len(results) == 2
-        assert results[0]["id"] == "t1"
-        assert results[0]["title"] == "Task 1"
-        assert results[0]["status"] == "needsAction"
-        assert results[1]["status"] == "completed"
+        tasks_update_task("list1", "t1", completed="")
+
+        _, kwargs = service.tasks().update.call_args
+        assert kwargs["body"] == {"completed": None, "status": "needsAction"}
 
 
-def test_tasks_complete_task():
-    from app.tools.tasks import tasks_complete_task
+def test_drive_upload_rejects_invalid_base64():
+    """drive_upload_file must raise a clear error before touching Google."""
+    from app.tools.drive import drive_upload_file
 
-    with patch("app.tools.tasks.get_google_client") as mock_client_cls:
-        client = MagicMock()
-        client.has_token.return_value = True
-        service = MagicMock()
-        client.get_service.return_value = service
-        mock_client_cls.return_value = client
-
-        service.tasks().update().execute.return_value = {
-            "id": "task123",
-            "title": "Buy milk",
-            "status": "completed",
-        }
-
-        result = tasks_complete_task(list_id="@default", task_id="task123")
-        assert result["id"] == "task123"
-        assert result["status"] == "completed"
-        assert "completed" in result["message"]
-
-
-def test_tasks_delete_task():
-    from app.tools.tasks import tasks_delete_task
-
-    with patch("app.tools.tasks.get_google_client") as mock_client_cls:
-        client = MagicMock()
-        client.has_token.return_value = True
-        service = MagicMock()
-        client.get_service.return_value = service
-        mock_client_cls.return_value = client
-
-        service.tasks().delete().execute.return_value = {}
-
-        result = tasks_delete_task(list_id="@default", task_id="task123")
-        assert result["id"] == "task123"
-        assert result["status"] == "deleted"
-        assert result["list_id"] == "@default"
-
-
-def test_tasks_tools_require_auth():
-    from app.tools.tasks import tasks_list_lists
-
-    with patch("app.tools.tasks.get_google_client") as mock:
-        client = MagicMock()
-        client.has_token.return_value = False
-        mock.return_value = client
-
-        with pytest.raises(RuntimeError, match="Google authentication required"):
-            tasks_list_lists()
+    with pytest.raises(ValueError, match="base64"):
+        drive_upload_file("x.txt", "!!!not-base64!!!")

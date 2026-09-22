@@ -188,6 +188,10 @@ class Registry:
 
 
 def _now_iso() -> str:
-    from datetime import datetime
+    from datetime import datetime, timezone
     from zoneinfo import ZoneInfo
-    return datetime.now(ZoneInfo(settings.tz)).isoformat()
+    try:
+        return datetime.now(ZoneInfo(settings.tz)).isoformat()
+    except Exception:
+        log.warning("Invalid timezone %r, using UTC for timestamps", settings.tz)
+        return datetime.now(timezone.utc).isoformat()

@@ -137,7 +137,10 @@ def drive_upload_file(
     """
     from googleapiclient.http import MediaIoBaseUpload
 
-    content = base64.b64decode(content_base64)
+    try:
+        content = base64.b64decode(content_base64, validate=True)
+    except Exception:
+        raise ValueError("content_base64 is not valid base64")
     media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime_type)
     body: dict[str, Any] = {"name": name}
     if parent_folder_id:
@@ -173,9 +176,8 @@ def drive_create_file(
 
 
 def drive_delete_file(file_id: str) -> dict[str, Any]:
-    """Delete a file from Google Drive by ID.
+    """Permanently delete a file from Google Drive by ID.
 
-    Moves the file to trash (Google Drive API delete permanently removes).
     Returns: dict with id, status, message.
     """
     service = _ensure_auth()
@@ -194,4 +196,3 @@ def drive_delete_file(file_id: str) -> dict[str, Any]:
         "status": "deleted",
         "message": f"File deleted — '{file_name}' (ID: {file_id})",
     }
-
