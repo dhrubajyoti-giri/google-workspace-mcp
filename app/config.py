@@ -6,8 +6,6 @@ at runtime.  See ``.env.example`` for the full list.
 from __future__ import annotations
 
 import logging
-import os
-from pathlib import Path
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
