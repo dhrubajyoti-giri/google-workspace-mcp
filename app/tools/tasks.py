@@ -37,7 +37,7 @@ def tasks_get_list(list_id: str = "@default") -> dict[str, Any]:
     """Get a single task list by ID.
 
     Parameters:
-      list_id — the task list ID
+      list_id — the task list ID (or '@default' for the default list)
 
     Returns a dict with: id, title, kind, selfLink.
     """
