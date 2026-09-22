@@ -40,20 +40,15 @@ router = APIRouter(prefix="/oauth", tags=["oauth"])
 # Google OAuth state -> {flow, rid, step, created_at, expires_at}
 _google_state_store: dict[str, dict[str, Any]] = {}
 
-# rid (request_id from provider's auth request store) -> {email, selected_scopes, expires_at}
-# Set after step 1 (identify) completes; used in steps 2, 5, 8
-_callback_session: dict[str, dict[str, Any]] = {}
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _cleanup_stores() -> None:
-    """Remove expired entries from in-memory stores."""
+    """Remove expired entries from the in-memory Google state store."""
     now = time.time()
-    for store in [_google_state_store, _callback_session]:
-        expired = [k for k, v in store.items() if v.get("expires_at", 0) < now]
-        for k in expired:
-            del store[k]
+    expired = [k for k, v in _google_state_store.items() if v.get("expires_at", 0) < now]
+    for k in expired:
+        del _google_state_store[k]
 
 
 def _get_redirect_uri() -> str:
@@ -97,8 +92,8 @@ def _google_auth_url(
         state: Google OAuth state parameter (carries our internal {rid}|{step})
         access_type: "offline" (get refresh token) or "online" (no refresh token)
         include_granted: if True, include previously granted scopes (incremental
-                          authorization). Set False for the identify step so Google
-                          shows only the minimal consent screen.
+                          authorization). Set False so Google shows only the
+                          minimal consent screen.
 
     Returns:
         Google authorization URL (browser should redirect user here)
@@ -112,7 +107,7 @@ def _google_auth_url(
         "state": state,
     }
     # Only include include_granted_scopes when incremental authorization is needed.
-    # For the identify step (include_granted=False), omit it entirely so Google
+    # When include_granted=False, omit it entirely so Google
     # shows a minimal consent screen (openid + email only), not all previously
     # granted scopes.
     if include_granted:
@@ -385,9 +380,8 @@ async def scope_submit(request: Request):
 def callback(request: Request):
     """Google OAuth callback (public — Google redirects here).
 
-    Handles both steps:
-    - state={rid}|identify: exchange code, extract email, redirect to /oauth/scale
-    - state={rid}|authorize: exchange code, store in registry, complete MCP auth
+    Handles state={rid}|auth: exchange code, extract email, store in
+    registry, complete MCP auth.
     """
     code = request.query_params.get("code")
     state = request.query_params.get("state", "")
@@ -602,37 +596,3 @@ def _success_page_with_token(email: str, scopes: list[str], access_token: str) -
     import urllib.parse
     scopes_display = ", ".join(scopes[:5]) + (" ..." if len(scopes) > 5 else "")
     token_display = access_token[:60] + "..." if len(access_token) > 60 else access_token
-
-    return HTMLResponse(f"""<!DOCTYPE html>
-<html><head><title>OAuth Success</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-  body{{font-family:-apple-system,sans-serif;max-width:600px;margin:40px auto;padding:0 20px;text-align:center}}
-  .success{{background:#e8f5e9;padding:25px;border-radius:10px;border:1px solid #c8e6c9}}
-  h1{{color:#2e7d32;font-size:22px}}
-  code{{background:#f5f5f5;padding:8px 12px;border-radius:4px;font-size:11px;word-break:break-all;display:block;margin:10px 0;text-align:left}}
-  .scopes{{background:#f5f5f5;padding:10px;border-radius:4px;font-size:12px;text-align:left;max-height:150px;overflow:auto}}
-  button{{background:#0066cc;color:white;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px;margin-top:8px}}
-  button:hover{{background:#0052a3}}
-</style></head><body>
-<div class="success">
-  <h1>✓ OAuth Successful</h1>
-  <p><strong>Account:</strong> {email}</p>
-  <p><strong>Scopes granted:</strong> {len(scopes)}</p>
-  <div class="scopes">{scopes_display}</div>
-  <p style="margin-top:15px;font-size:12px;text-align:left;">
-    <strong>MCP Bearer Token</strong> (for standalone MCP client usage):
-  </p>
-  <code id="token">{token_display}</code>
-  <button onclick="navigator.clipboard.writeText('{access_token}');this.textContent='✓ Copied!'">
-    Copy to clipboard
-  </button>
-  <p style="font-size:10px;color:#999;margin-top:12px;">
-    Note: MCP clients with OAuth auto-discovery (QwenPaw, Claude Desktop)
-    do not need this token — they discover endpoints automatically.
-  </p>
-</div>
-<p style="margin-top:10px;font-size:12px;color:#999;">
-  <p>Authorized accounts are managed via your MCP client.</p>
-</p>
-</body></html>""")
