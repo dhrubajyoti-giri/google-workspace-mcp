@@ -19,7 +19,6 @@ from google.auth.transport.requests import Request as GoogleRequest
 from googleapiclient.discovery import build
 
 from app.config import settings
-from app.registry import Registry
 from app.oauth_provider import registry as _registry
 
 # Import the MCP auth context accessor
@@ -222,8 +221,3 @@ def get_google_client() -> GoogleClient:
 
     scopes = _registry.get_scopes(subject) or settings.default_scopes
     return GoogleClient(email=subject, token_data=token_data, scopes=scopes)
-
-
-def get_registry() -> Registry:
-    """Access the shared Registry singleton."""
-    return _registry

@@ -161,17 +161,6 @@ class Registry:
             data = self._load()
             return email in data["users"]
 
-    def update_scopes(self, email: str, scopes: list[str]) -> bool:
-        """Update a user's scopes. Returns True if user exists."""
-        with self._lock:
-            data = self._load()
-            if email in data["users"]:
-                data["users"][email]["scopes"] = scopes
-                data["users"][email]["refreshed_at"] = _now_iso()
-                self._save(data)
-                return True
-            return False
-
     def get_token(self, email: str) -> dict[str, Any] | None:
         """Get a user's Google token data (for GoogleClient)."""
         with self._lock:

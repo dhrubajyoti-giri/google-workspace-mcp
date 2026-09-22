@@ -88,7 +88,7 @@ def slides_create(title: str = "Untitled Presentation", folder_id: str = "") -> 
             "url": "",
             "folder_id": folder_id,
             "status": "error",
-            "message": f"Failed to create Google Slides — no presentationId in API response",
+            "message": "Failed to create Google Slides — no presentationId in API response",
         }
 
     # Move to specified folder if requested (Slides API doesn't support folder placement)

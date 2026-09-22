@@ -43,7 +43,6 @@ def docs_get(document_id: str) -> dict[str, Any]:
     sections: list[dict[str, Any]] = []
     tables: list[dict] = []
     lists: list[str] = []
-    current_heading: str | None = None
 
     def _extract_text(element: dict) -> None:
         """Recursively extract text from a document element."""
@@ -151,7 +150,7 @@ def docs_create(title: str, content: str = "", folder_id: str = "") -> dict[str,
             "url": "",
             "folder_id": folder_id,
             "status": "error",
-            "message": f"Failed to create Google Doc — no documentId in API response",
+            "message": "Failed to create Google Doc — no documentId in API response",
         }
 
     # Move to specified folder if requested (Docs API doesn't support folder placement)
