@@ -210,6 +210,9 @@ def main():
         text = blocks[0] if blocks else ""
         preview = text[:80] + "..." if len(text) > 80 else text
         print(f"\n  Tool: {label}()")
+        print(f"    content[0].text preview: \"{preview}\"")
+        print(f"    structuredContent: dict with {len(ct.structuredContent or {})} keys")
+        print("    LLM sees: full JSON dump (usable but not human-readable)")
 
     # ── Category 3: list[dict]-returning tools ───────────────
     print(f"\n{'─'*78}")
