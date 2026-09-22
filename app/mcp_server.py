@@ -7,13 +7,12 @@ mounts at ``/mcp``.  Each tool delegates to the implementation in
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any
+from typing import Any
 from urllib.parse import urlparse
 
 from mcp.server import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent
-from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.tools.gmail import gmail_search as _gmail_search, gmail_get_message as _gmail_get, gmail_send as _gmail_send, gmail_create_draft as _gmail_create_draft
@@ -128,7 +127,7 @@ for h in _raw_hosts:
         _extra_hosts.append(f"{h}:*")
 
 mcp = FastMCP(
-    name=settings.mcp_server_name,
+    settings.mcp_server_name,
     instructions=f"Google Workspace MCP v{settings.mcp_server_version} — Gmail, Drive, Docs, Sheets, Calendar, Slides, Tasks",
     streamable_http_path="/",
     transport_security=TransportSecuritySettings(
@@ -426,7 +425,7 @@ def drive_create_file(name: str, content: str, mime_type: str = "text/plain", pa
     summary = f"Created '{name}' ({mime_type}, {len(content)} bytes) in Google Drive. File ID: {result.get('id', '')}"
     return CallToolResult(
         content=[TextContent(type="text", text=summary)],
-        structuredContent={**result, "message": summary},
+        structuredContent=result,
     )
 
 
@@ -758,7 +757,7 @@ def tasks_update_task(
     title: str = "",
     notes: str = "",
     due: str = "",
-    completed: str = "",
+    completed: str | None = None,
     deleted: bool = False,
 ) -> CallToolResult:
     """Update a task by ID. Only non-empty fields are sent.
@@ -769,7 +768,8 @@ def tasks_update_task(
       title — new title (leave empty to keep current)
       notes — new notes (leave empty to keep current)
       due — new due date as RFC 3339 timestamp
-      completed — timestamp to mark as complete (empty string = un-complete)
+      completed — timestamp to mark as complete; pass "" to un-complete
+        (leave unset to keep current completion status)
       deleted — if True, deletes the task
     """
     result = _tasks_update_task(list_id, task_id, title, notes, due, completed, deleted)
@@ -825,61 +825,3 @@ def _strip_scope(scope_url: str) -> str:
     """
     prefix = "https://www.googleapis.com/auth/"
     return scope_url[len(prefix):] if scope_url.startswith(prefix) else scope_url
-
-
-async def _filtered_list_tools() -> list[Any]:
-    """Return only the tools the current user is authorized to use.
-
-    Looks up the user's Google email from the MCP auth context (set by
-    ``AuthContextMiddleware``), fetches their granted scopes from the
-    registry, and keeps only tools whose required scope is satisfied.
-    """
-    tools = await _orig_list_tools()
-
-    try:
-        from mcp.server.auth.middleware.auth_context import get_access_token
-        from app.registry import Registry
-
-        access_token = get_access_token()
-        if access_token is None or not access_token.subject:
-            # No authenticated user in context — no tools available.
-            return []
-
-        _reg = Registry(settings.registry_file)
-        user_scopes = _reg.get_scopes(access_token.subject) or []
-        user_scope_names = {_strip_scope(s) for s in user_scopes}
-
-        filtered: list[Any] = []
-        for t in tools:
-            required = TOOL_SCOPE_REQUIREMENTS.get(t.name, [])
-            if not required:
-                # Unknown tool — include to be safe.
-                filtered.append(t)
-                continue
-            if any(sc in user_scope_names for sc in required):
-                filtered.append(t)
-            else:
-                log.debug(
-                    "Filtering tool %s — user lacks scopes %s (has: %s)",
-                    t.name, required, sorted(user_scope_names),
-                )
-        return filtered
-    except Exception as e:
-        log.warning(
-            "Scope-based tool filtering failed (%s) — falling back to all tools", e,
-        )
-        return tools
-
-
-mcp.list_tools = _filtered_list_tools
-
-
-# ── ASGI app factory for FastAPI mount ───────────────────────
-
-def create_mcp_asgi():
-    """Return the Starlette ASGI app for streamable HTTP transport.
-
-    FastAPI mounts this at ``/mcp`` so the full MCP endpoint becomes
-    ``POST https://<domain>/mcp``.
-    """
-    return mcp.streamable_http_app()
