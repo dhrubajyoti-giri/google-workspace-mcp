@@ -593,6 +593,39 @@ def _render_scope_form(rid, visible_scopes, request):
 
 def _success_page_with_token(email: str, scopes: list[str], access_token: str) -> HTMLResponse:
     """Success page for manual OAuth flow — shows MCP bearer token."""
-    import urllib.parse
     scopes_display = ", ".join(scopes[:5]) + (" ..." if len(scopes) > 5 else "")
     token_display = access_token[:60] + "..." if len(access_token) > 60 else access_token
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html><head><title>OAuth Success</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{{font-family:-apple-system,sans-serif;max-width:600px;margin:40px auto;padding:0 20px;text-align:center}}
+  .success{{background:#e8f5e9;padding:25px;border-radius:10px;border:1px solid #c8e6c9}}
+  h1{{color:#2e7d32;font-size:22px}}
+  code{{background:#f5f5f5;padding:8px 12px;border-radius:4px;font-size:11px;word-break:break-all;display:block;margin:10px 0;text-align:left}}
+  .scopes{{background:#f5f5f5;padding:10px;border-radius:4px;font-size:12px;text-align:left;max-height:150px;overflow:auto}}
+  button{{background:#0066cc;color:white;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px;margin-top:8px}}
+  button:hover{{background:#0052a3}}
+</style></head><body>
+<div class="success">
+  <h1>✓ OAuth Successful</h1>
+  <p><strong>Account:</strong> {email}</p>
+  <p><strong>Scopes granted:</strong> {len(scopes)}</p>
+  <div class="scopes">{scopes_display}</div>
+  <p style="margin-top:15px;font-size:12px;text-align:left;">
+    <strong>MCP Bearer Token</strong> (for standalone MCP client usage):
+  </p>
+  <code id="token">{token_display}</code>
+  <button onclick="navigator.clipboard.writeText('{access_token}');this.textContent='✓ Copied!'">
+    Copy to clipboard
+  </button>
+  <p style="font-size:10px;color:#999;margin-top:12px;">
+    Note: MCP clients with OAuth auto-discovery (QwenPaw, Claude Desktop)
+    do not need this token — they discover endpoints automatically.
+  </p>
+</div>
+<p style="margin-top:10px;font-size:12px;color:#999;">
+  <p>Authorized accounts are managed via your MCP client.</p>
+</p>
+</body></html>""")
