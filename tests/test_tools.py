@@ -1,5 +1,4 @@
 """Tests for Google API tools with mocked services."""
-import json
 import base64
 from unittest.mock import patch, MagicMock
 
