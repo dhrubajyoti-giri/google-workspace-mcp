@@ -1,5 +1,3 @@
-successfully downloaded text file (SHA: 991941ad033a325d1dab1a3b6dc5601d576d2d31)
-successfully downloaded text file (SHA: a26a204caab15404770f3deec838dd336cddfad3)
 """Centralized Google Credentials management.
 
 In the MCP OAuth flow, the MCP SDK's ``AuthContextMiddleware`` sets the
