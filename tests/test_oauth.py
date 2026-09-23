@@ -1,3 +1,4 @@
+successfully downloaded text file (SHA: e0c79b4f11e85127912a292710d1a7d3875a5b60)
 """Tests for the OAuth flow: state store management, code exchange, cleanup."""
 import asyncio
 import time
@@ -571,17 +572,37 @@ def test_merge_token_data_preserves_refresh_token():
 
 def test_parse_expiry_handles_formats():
     """_parse_expiry must accept naive/aware ISO strings and reject garbage
-    without raising."""
+    without raising. Results match google-auth's naive-utcnow convention so
+    Credentials.expired comparisons never raise TypeError."""
     from datetime import datetime, timezone
 
     aware = _parse_expiry("2030-01-01T00:00:00+00:00")
-    assert aware is not None and aware.tzinfo is not None
+    assert aware is not None and aware == datetime(2030, 1, 1)
 
     naive = _parse_expiry("2030-01-01T00:00:00")
-    assert naive is not None and naive.tzinfo == timezone.utc
+    assert naive is not None and naive == datetime(2030, 1, 1)
+
+    tz_shifted = _parse_expiry("2030-01-01T05:30:00+05:30")
+    assert tz_shifted is not None and tz_shifted == datetime(2030, 1, 1)
 
     assert _parse_expiry(None) is None
     assert _parse_expiry("not-a-date") is None
 
-    dt = datetime(2030, 1, 1)
-    assert _parse_expiry(dt) is dt
+    assert _parse_expiry(datetime(2030, 1, 1)) == datetime(2030, 1, 1)
+    assert _parse_expiry(datetime(2030, 1, 1, tzinfo=timezone.utc)) == datetime(2030, 1, 1)
+
+
+def test_parsed_expiry_comparable_by_google_auth():
+    """Regression: parsed expiries must not crash Credentials.expired.
+
+    google-auth compares expiry against its naive utcnow(); an aware
+    datetime here raised "can't compare offset-naive and offset-aware
+    datetimes" on every tool call with a stored expiry.
+    """
+    from google.oauth2.credentials import Credentials
+
+    future = _parse_expiry("2030-01-01T00:00:00+05:30")
+    assert Credentials(token="t", expiry=future).expired is False
+
+    past = _parse_expiry("2000-01-01T00:00:00")
+    assert Credentials(token="t", expiry=past).expired is True
