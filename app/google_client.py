@@ -1,3 +1,4 @@
+successfully downloaded text file (SHA: 991941ad033a325d1dab1a3b6dc5601d576d2d31)
 successfully downloaded text file (SHA: a26a204caab15404770f3deec838dd336cddfad3)
 """Centralized Google Credentials management.
 
@@ -70,7 +71,11 @@ def _parse_expiry(value: Any) -> datetime | None:
         dt = value
     elif isinstance(value, str):
         try:
-            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            # Only a trailing "Z" is a UTC designator — a blanket replace
+            # would corrupt any other "Z" in the string.
+            dt = datetime.fromisoformat(
+                value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+            )
         except (ValueError, TypeError):
             return None
     else:
