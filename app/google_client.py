@@ -1,3 +1,4 @@
+successfully downloaded text file (SHA: a26a204caab15404770f3deec838dd336cddfad3)
 """Centralized Google Credentials management.
 
 In the MCP OAuth flow, the MCP SDK's ``AuthContextMiddleware`` sets the
@@ -55,21 +56,35 @@ def _parse_expiry(value: Any) -> datetime | None:
     historically stored both naive and aware strings). Returns None when
     missing/unparseable — Credentials then behaves as before (no proactive
     refresh) rather than crashing.
+
+    The result matches ``google.auth._helpers.utcnow()`` naivety: google-auth
+    compares ``expiry`` against its own naive ``utcnow()`` in
+    ``Credentials.expired``, so an aware datetime here raises
+    "can't compare offset-naive and offset-aware datetimes" on every call.
     """
+    from datetime import timezone as dt_tz
+
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
+        dt = value
+    elif isinstance(value, str):
         try:
             dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                from datetime import timezone as dt_tz
-                dt = dt.replace(tzinfo=dt_tz.utc)
-            return dt
         except (ValueError, TypeError):
             return None
-    return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=dt_tz.utc)
+    dt = dt.astimezone(dt_tz.utc)
+    try:
+        from google.auth import _helpers
+        if _helpers.utcnow().tzinfo is None:
+            return dt.replace(tzinfo=None)
+    except Exception:
+        pass
+    return dt
 
 
 class GoogleClient:
